@@ -5,11 +5,20 @@ let socket;
 function initializeSocket() {
     console.log('Initializing Socket.io connection...');
     
+    // Disconnect existing socket if any
+    if (socket && socket.connected) {
+        socket.disconnect();
+    }
+    
     socket = io({
         path: '/api/socket',
         transports: ['websocket', 'polling'],
         timeout: 20000,
-        forceNew: true
+        forceNew: true,
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionAttempts: 5,
+        maxReconnectionAttempts: 5
     });
 
     socket.on('connect', () => {
@@ -18,12 +27,26 @@ function initializeSocket() {
             connectionStatus.textContent = 'Connected';
             connectionStatus.className = 'connection-status connected';
         }
+        
+        // Auto-rejoin if we have a saved session and are reconnecting
+        const savedSession = localStorage.getItem('myteams-session');
+        if (savedSession && !currentUser) {
+            try {
+                const session = JSON.parse(savedSession);
+                if (session.teamCode && session.userName) {
+                    console.log('Rejoining team after reconnection...');
+                    socket.emit('join-team', { teamCode: session.teamCode, userName: session.userName });
+                }
+            } catch (error) {
+                console.error('Error parsing saved session:', error);
+            }
+        }
     });
 
     socket.on('disconnect', () => {
         console.log('Socket.io disconnected');
         if (connectionStatus) {
-            connectionStatus.textContent = 'Disconnected';
+            connectionStatus.textContent = 'Reconnecting...';
             connectionStatus.className = 'connection-status disconnected';
         }
     });
@@ -33,6 +56,14 @@ function initializeSocket() {
         if (connectionStatus) {
             connectionStatus.textContent = 'Connection Error';
             connectionStatus.className = 'connection-status error';
+        }
+    });
+
+    socket.on('reconnect', (attemptNumber) => {
+        console.log('Socket.io reconnected after', attemptNumber, 'attempts');
+        if (connectionStatus) {
+            connectionStatus.textContent = 'Connected';
+            connectionStatus.className = 'connection-status connected';
         }
     });
 
@@ -61,6 +92,8 @@ function setupSocketEventListeners() {
         if (chatUserInitial) chatUserInitial.textContent = 'T';
         if (chatUserName) chatUserName.textContent = 'Team Chat';
         if (chatUserStatus) chatUserStatus.textContent = 'Team Channel';
+        
+        console.log(`Successfully joined team ${currentTeam} as ${currentUser}`);
     });
 
     socket.on('users-update', (updatedUsers) => {
@@ -74,6 +107,7 @@ function setupSocketEventListeners() {
         if (data.chatId === currentChatId && data.chatType === currentChatType) {
             messages = data.messages || [];
             renderMessages();
+            scrollToBottom();
             console.log(`Loaded ${messages.length} messages for ${data.chatType} chat`);
         }
     });
@@ -97,7 +131,7 @@ function setupSocketEventListeners() {
                 console.log(`Added new message to current chat. Total: ${messages.length}`);
             }
         } else {
-            console.log('Message not for current chat, ignoring');
+            console.log('Message not for current chat, but updating user list for notifications');
         }
     });
 
@@ -188,6 +222,33 @@ document.addEventListener('DOMContentLoaded', () => {
     connectionStatus.className = 'connection-status connecting';
     connectionStatus.textContent = 'Connecting...';
     document.body.appendChild(connectionStatus);
+    
+    // Check if user should be logged in already
+    const savedSession = localStorage.getItem('myteams-session');
+    if (savedSession) {
+        try {
+            const session = JSON.parse(savedSession);
+            if (session.teamCode && session.userName) {
+                // User has a valid session, should go directly to main screen
+                currentUser = session.userName;
+                currentTeam = session.teamCode;
+                currentChatType = 'team';
+                currentChatId = currentTeam;
+                
+                // Show main screen immediately to prevent login page flash
+                if (loginScreen && mainScreen) {
+                    loginScreen.classList.add('hidden');
+                    mainScreen.classList.remove('hidden');
+                    
+                    if (teamInfo) teamInfo.textContent = `Team: ${currentTeam}`;
+                    if (userInitial) userInitial.textContent = currentUser.charAt(0).toUpperCase();
+                }
+            }
+        } catch (error) {
+            console.error('Invalid session data:', error);
+            localStorage.removeItem('myteams-session');
+        }
+    }
     
     // Set up DOM event listeners
     setupDOMEventListeners();
@@ -299,14 +360,28 @@ function handleAutoLogin() {
                 if (teamCodeInput) teamCodeInput.value = session.teamCode;
                 if (userNameInput) userNameInput.value = session.userName;
                 
-                // Wait for socket connection before auto-login
-                setTimeout(() => {
-                    if (socket && socket.connected) {
-                        socket.emit('join-team', { teamCode: session.teamCode, userName: session.userName });
-                    } else {
-                        console.log('Socket not ready for auto-login, user will need to login manually');
-                    }
-                }, 2000);
+                // If we're already connected, join immediately
+                if (socket && socket.connected) {
+                    console.log('Socket already connected, joining team immediately...');
+                    socket.emit('join-team', { teamCode: session.teamCode, userName: session.userName });
+                } else {
+                    // Wait for socket connection before auto-login
+                    let attempts = 0;
+                    const maxAttempts = 10;
+                    const tryJoin = () => {
+                        attempts++;
+                        if (socket && socket.connected) {
+                            console.log('Socket connected, attempting to join team...');
+                            socket.emit('join-team', { teamCode: session.teamCode, userName: session.userName });
+                        } else if (attempts < maxAttempts) {
+                            console.log(`Waiting for socket connection... attempt ${attempts}`);
+                            setTimeout(tryJoin, 1000);
+                        } else {
+                            console.log('Socket connection timeout, user will need to login manually');
+                        }
+                    };
+                    tryJoin();
+                }
             }
         } catch (error) {
             console.error('Error parsing saved session:', error);

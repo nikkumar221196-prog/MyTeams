@@ -1,14 +1,15 @@
 const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
 
-// In-memory storage for Vercel serverless function
-const teams = new Map();
-const users = new Map();
-const messages = new Map();
-const directMessages = new Map();
-const unreadCounts = new Map();
-const userSessions = new Map();
-const allTeamUsers = new Map();
+// Global storage that persists across serverless invocations
+let globalIO = null;
+const teams = global.teams || (global.teams = new Map());
+const users = global.users || (global.users = new Map());
+const messages = global.messages || (global.messages = new Map());
+const directMessages = global.directMessages || (global.directMessages = new Map());
+const unreadCounts = global.unreadCounts || (global.unreadCounts = new Map());
+const userSessions = global.userSessions || (global.userSessions = new Map());
+const allTeamUsers = global.allTeamUsers || (global.allTeamUsers = new Map());
 
 // Helper functions
 function getUserKey(teamCode, userName) {
@@ -65,8 +66,16 @@ module.exports = function handler(req, res) {
             cors: {
                 origin: "*",
                 methods: ["GET", "POST"]
-            }
+            },
+            transports: ['websocket', 'polling'],
+            allowEIO3: true,
+            pingTimeout: 60000,
+            pingInterval: 25000
         });
+
+        // Store the IO instance globally
+        globalIO = io;
+        res.socket.server.io = io;
 
         io.on('connection', (socket) => {
             console.log('User connected:', socket.id);
@@ -116,6 +125,7 @@ module.exports = function handler(req, res) {
                     unreadCounts.set(socket.id, new Map());
                 }
                 
+                // Send message history
                 if (messages.has(teamCode)) {
                     socket.emit('message-history', {
                         chatType: 'team',
@@ -128,6 +138,7 @@ module.exports = function handler(req, res) {
                 io.to(teamCode).emit('users-update', allUsersInTeam);
                 
                 socket.emit('join-success', { teamCode, userName });
+                console.log(`User ${userName} joined team ${teamCode}`);
             });
 
             socket.on('send-message', (data) => {
@@ -186,19 +197,30 @@ module.exports = function handler(req, res) {
                         targetUserKey: targetUser.userKey || targetUserKey
                     });
                     
+                    // Emit to sender
                     socket.emit('new-message', message);
                     
+                    // Emit to target if online
                     if (targetUser.online !== false && targetUserId) {
-                        socket.to(targetUserId).emit('new-message', message);
+                        io.to(targetUserId).emit('new-message', message);
                     }
+                    
+                    // Broadcast to all team members so they can update unread counts
+                    socket.broadcast.to(user.teamCode).emit('new-message', message);
+                    
                 } else {
+                    // Team message
                     if (!messages.has(user.teamCode)) {
                         messages.set(user.teamCode, []);
                     }
                     
                     messages.get(user.teamCode).push(message);
+                    
+                    // Broadcast to all team members
                     io.to(user.teamCode).emit('new-message', message);
                 }
+                
+                console.log(`Message sent by ${user.name} in ${chatType} chat`);
             });
 
             socket.on('get-direct-messages', (data) => {
@@ -301,7 +323,7 @@ module.exports = function handler(req, res) {
                         directMessages.set(chatId, []);
                         socket.emit('conversation-deleted', { chatType: 'direct', targetId: targetId });
                         if (targetId && !targetId.includes(':')) {
-                            socket.to(targetId).emit('conversation-deleted', { chatType: 'direct', targetId: socket.id });
+                            io.to(targetId).emit('conversation-deleted', { chatType: 'direct', targetId: socket.id });
                         }
                     }
                 }
@@ -324,17 +346,20 @@ module.exports = function handler(req, res) {
                     
                     if (teams.has(user.teamCode)) {
                         const allUsersInTeam = getAllTeamUsers(user.teamCode);
-                        socket.to(user.teamCode).emit('users-update', allUsersInTeam);
+                        socket.broadcast.to(user.teamCode).emit('users-update', allUsersInTeam);
                     }
                     
                     teams.get(user.teamCode)?.delete(socket.id);
                     users.delete(socket.id);
                     unreadCounts.delete(socket.id);
+                    
+                    console.log(`User ${user.name} disconnected`);
                 }
             });
         });
-
-        res.socket.server.io = io;
+    } else {
+        // Reuse existing IO instance
+        globalIO = res.socket.server.io;
     }
     
     res.end();

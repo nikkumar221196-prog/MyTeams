@@ -167,10 +167,11 @@ const allTeamUsers = new Map(); // Track all users who have ever been in each te
 // Load existing data on startup
 loadData();
 
-// Auto-delete messages after 2 hours (7200000 ms)
-let AUTO_DELETE_TIME = 2 * 60 * 60 * 1000; // 2 hours in milliseconds
+// Auto-delete messages after 24 hours instead of 2 hours (for testing)
+let AUTO_DELETE_TIME = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
 
-// Clean up messages periodically
+// Clean up messages periodically (disabled for testing)
+/*
 setInterval(() => {
   const now = Date.now();
   let hasChanges = false;
@@ -199,6 +200,7 @@ setInterval(() => {
     saveMessages();
   }
 }, 60000); // Check every minute
+*/
 
 // Socket connection handling
 io.on('connection', (socket) => {
