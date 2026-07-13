@@ -1,5 +1,319 @@
-// Socket.io connection
-const socket = io();
+// Socket.io connection for Vercel with initialization
+let socket;
+
+// Initialize Socket.io connection
+function initializeSocket() {
+    console.log('Initializing Socket.io connection...');
+    
+    socket = io({
+        path: '/api/socket',
+        transports: ['websocket', 'polling'],
+        timeout: 20000,
+        forceNew: true
+    });
+
+    socket.on('connect', () => {
+        console.log('Socket.io connected successfully!');
+        if (connectionStatus) {
+            connectionStatus.textContent = 'Connected';
+            connectionStatus.className = 'connection-status connected';
+        }
+    });
+
+    socket.on('disconnect', () => {
+        console.log('Socket.io disconnected');
+        if (connectionStatus) {
+            connectionStatus.textContent = 'Disconnected';
+            connectionStatus.className = 'connection-status disconnected';
+        }
+    });
+
+    socket.on('connect_error', (error) => {
+        console.error('Socket.io connection error:', error);
+        if (connectionStatus) {
+            connectionStatus.textContent = 'Connection Error';
+            connectionStatus.className = 'connection-status error';
+        }
+    });
+
+    setupSocketEventListeners();
+    return socket;
+}
+
+// Setup all Socket.io event listeners
+function setupSocketEventListeners() {
+    // Socket event listeners
+    socket.on('join-success', (data) => {
+        currentUser = data.userName;
+        currentTeam = data.teamCode;
+        currentChatType = 'team';
+        currentChatId = currentTeam;
+        
+        showMainScreen();
+        if (teamInfo) teamInfo.textContent = `Team: ${currentTeam}`;
+        if (userInitial) userInitial.textContent = currentUser.charAt(0).toUpperCase();
+        
+        // Set default chat header to team chat
+        const chatUserInitial = document.getElementById('chat-user-initial');
+        const chatUserName = document.getElementById('chat-user-name');
+        const chatUserStatus = document.getElementById('chat-user-status');
+        
+        if (chatUserInitial) chatUserInitial.textContent = 'T';
+        if (chatUserName) chatUserName.textContent = 'Team Chat';
+        if (chatUserStatus) chatUserStatus.textContent = 'Team Channel';
+    });
+
+    socket.on('users-update', (updatedUsers) => {
+        console.log('Users updated:', updatedUsers.length, 'users');
+        users = updatedUsers;
+        renderUsersList();
+    });
+
+    socket.on('message-history', (data) => {
+        console.log('Message history received:', data);
+        if (data.chatId === currentChatId && data.chatType === currentChatType) {
+            messages = data.messages || [];
+            renderMessages();
+            console.log(`Loaded ${messages.length} messages for ${data.chatType} chat`);
+        }
+    });
+
+    socket.on('new-message', (message) => {
+        console.log('New message received:', message);
+        
+        // Check if this message belongs to the current chat
+        const belongsToCurrentChat = 
+            (message.chatType === 'team' && currentChatType === 'team' && message.teamCode === currentChatId) ||
+            (message.chatType === 'direct' && currentChatType === 'direct' && 
+             (message.userId === currentChatId || message.targetUserId === currentChatId || 
+              message.userKey === currentChatId || message.targetUserKey === currentChatId));
+        
+        if (belongsToCurrentChat) {
+            // Prevent duplicate messages
+            if (!messages.find(m => m.id === message.id)) {
+                messages.push(message);
+                renderMessages();
+                scrollToBottom();
+                console.log(`Added new message to current chat. Total: ${messages.length}`);
+            }
+        } else {
+            console.log('Message not for current chat, ignoring');
+        }
+    });
+
+    socket.on('unread-update', (data) => {
+        console.log('Unread update received:', data);
+        
+        // Map socket ID to user name for display
+        const senderUser = users.find(u => u.id === data.fromUserId);
+        if (senderUser) {
+            unreadCounts.set(senderUser.id, data.count);
+            console.log(`Unread count for ${senderUser.name}: ${data.count}`);
+        } else {
+            // If sender user not found, just store by socket ID
+            unreadCounts.set(data.fromUserId, data.count);
+        }
+        
+        renderUsersList();
+    });
+
+    socket.on('conversation-deleted', (data) => {
+        if (data.chatType === currentChatType) {
+            messages = [];
+            renderMessages();
+            
+            if (data.chatType === 'team') {
+                alert('Team conversation has been deleted.');
+            } else {
+                alert('Conversation has been deleted.');
+            }
+        }
+    });
+
+    socket.on('message-deleted', (data) => {
+        if (data.deleteFor === 'everyone') {
+            messages = messages.filter(msg => msg.id !== data.messageId);
+            renderMessages();
+        } else {
+            // Hide message for current user only
+            const messageElement = document.querySelector(`[data-message-id="${data.messageId}"]`);
+            if (messageElement) {
+                messageElement.style.display = 'none';
+            }
+        }
+    });
+
+    socket.on('incoming-call', (data) => {
+        currentCallData = data;
+        showIncomingCall(data);
+    });
+
+    socket.on('call-answered', (data) => {
+        if (data.accepted) {
+            alert('Call accepted! Video calling functionality would be implemented here.');
+        } else {
+            alert('Call declined.');
+        }
+    });
+}
+
+// Initialize everything when page loads
+document.addEventListener('DOMContentLoaded', () => {
+    // Initialize DOM elements
+    loginScreen = document.getElementById('login-screen');
+    mainScreen = document.getElementById('main-screen');
+    loginForm = document.getElementById('login-form');
+    teamCodeInput = document.getElementById('team-code');
+    userNameInput = document.getElementById('user-name');
+    teamInfo = document.getElementById('team-info');
+    userInitial = document.getElementById('user-initial');
+    usersList = document.getElementById('users-list');
+    messagesContainer = document.getElementById('messages-container');
+    messageInput = document.getElementById('message-input');
+    sendBtn = document.getElementById('send-btn');
+    userMenuBtn = document.getElementById('user-menu-btn');
+    userDropdown = document.getElementById('user-dropdown');
+    emojiPicker = document.getElementById('emoji-picker');
+    settingsModal = document.getElementById('settings-modal');
+    callModal = document.getElementById('call-modal');
+    menuToggle = document.getElementById('menu-toggle');
+    backBtn = document.getElementById('back-btn');
+    sidebar = document.querySelector('.sidebar');
+    conversationOptions = document.getElementById('conversation-options');
+    fileInput = document.getElementById('file-input');
+    
+    // Add connection status indicator
+    connectionStatus = document.createElement('div');
+    connectionStatus.id = 'connection-status';
+    connectionStatus.className = 'connection-status connecting';
+    connectionStatus.textContent = 'Connecting...';
+    document.body.appendChild(connectionStatus);
+    
+    // Set up DOM event listeners
+    setupDOMEventListeners();
+    
+    // Initialize socket connection
+    initializeSocket();
+    
+    // Auto-login if session exists
+    handleAutoLogin();
+});
+
+// Setup DOM event listeners
+function setupDOMEventListeners() {
+    if (loginForm) {
+        loginForm.addEventListener('submit', handleLogin);
+    }
+    if (sendBtn) {
+        sendBtn.addEventListener('click', sendMessage);
+    }
+    if (messageInput) {
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+        messageInput.addEventListener('input', () => {
+            if (sendBtn) {
+                sendBtn.disabled = messageInput.value.trim() === '';
+            }
+        });
+    }
+    if (userMenuBtn) {
+        userMenuBtn.addEventListener('click', () => {
+            if (userDropdown) {
+                userDropdown.classList.toggle('hidden');
+            }
+        });
+    }
+    if (menuToggle) {
+        menuToggle.addEventListener('click', () => {
+            if (sidebar) {
+                sidebar.classList.toggle('open');
+            }
+        });
+    }
+    if (backBtn) {
+        backBtn.addEventListener('click', () => {
+            if (sidebar) {
+                sidebar.classList.add('open');
+            }
+        });
+    }
+    
+    // Set up file input event listener
+    const fileInputElement = document.getElementById('file-input');
+    if (fileInputElement) {
+        fileInputElement.addEventListener('change', handleFileSelect);
+    }
+    
+    // Set up paperclip button
+    const paperclipButtons = document.querySelectorAll('.input-btn');
+    paperclipButtons.forEach(btn => {
+        if (btn.innerHTML.includes('fa-paperclip')) {
+            btn.addEventListener('click', () => {
+                if (fileInputElement) {
+                    fileInputElement.click();
+                }
+            });
+        }
+    });
+    
+    // Set up emoji click handlers
+    const emojiGrid = document.querySelector('.emoji-grid');
+    if (emojiGrid) {
+        emojiGrid.addEventListener('click', (e) => {
+            if (e.target.textContent.trim()) {
+                insertEmoji(e.target.textContent);
+            }
+        });
+    }
+    
+    // Global click handlers
+    document.addEventListener('click', (e) => {
+        if (userMenuBtn && userDropdown && !userMenuBtn.contains(e.target) && !userDropdown.contains(e.target)) {
+            userDropdown.classList.add('hidden');
+        }
+        
+        // Close conversation options when clicking outside
+        if (conversationOptions && !conversationOptions.contains(e.target) && 
+            !e.target.closest('.action-btn')) {
+            conversationOptions.classList.add('hidden');
+        }
+        
+        // Close sidebar when clicking outside on mobile
+        if (window.innerWidth <= 768 && sidebar && sidebar.classList.contains('open') && 
+            !sidebar.contains(e.target) && menuToggle && !menuToggle.contains(e.target)) {
+            sidebar.classList.remove('open');
+        }
+    });
+}
+
+// Handle auto-login
+function handleAutoLogin() {
+    const savedSession = localStorage.getItem('myteams-session');
+    if (savedSession) {
+        try {
+            const session = JSON.parse(savedSession);
+            if (session.teamCode && session.userName) {
+                if (teamCodeInput) teamCodeInput.value = session.teamCode;
+                if (userNameInput) userNameInput.value = session.userName;
+                
+                // Wait for socket connection before auto-login
+                setTimeout(() => {
+                    if (socket && socket.connected) {
+                        socket.emit('join-team', { teamCode: session.teamCode, userName: session.userName });
+                    } else {
+                        console.log('Socket not ready for auto-login, user will need to login manually');
+                    }
+                }, 2000);
+            }
+        } catch (error) {
+            console.error('Error parsing saved session:', error);
+            localStorage.removeItem('myteams-session');
+        }
+    }
+}
 
 // Global variables
 let currentUser = null;
@@ -11,253 +325,41 @@ let currentChatId = null; // team code for team chat, user id for direct chat
 let currentCallData = null;
 let unreadCounts = new Map(); // Track unread messages
 
-// DOM elements
-const loginScreen = document.getElementById('login-screen');
-const mainScreen = document.getElementById('main-screen');
-const loginForm = document.getElementById('login-form');
-const teamCodeInput = document.getElementById('team-code');
-const userNameInput = document.getElementById('user-name');
-const teamInfo = document.getElementById('team-info');
-const userInitial = document.getElementById('user-initial');
-const usersList = document.getElementById('users-list');
-const messagesContainer = document.getElementById('messages-container');
-const messageInput = document.getElementById('message-input');
-const sendBtn = document.getElementById('send-btn');
-const userMenuBtn = document.getElementById('user-menu-btn');
-const userDropdown = document.getElementById('user-dropdown');
-const emojiPicker = document.getElementById('emoji-picker');
-const settingsModal = document.getElementById('settings-modal');
-const callModal = document.getElementById('call-modal');
-const menuToggle = document.getElementById('menu-toggle');
-const backBtn = document.getElementById('back-btn');
-const sidebar = document.querySelector('.sidebar');
-const conversationOptions = document.getElementById('conversation-options');
-const fileInput = document.getElementById('file-input');
+// DOM elements - will be initialized after DOM loads
+let loginScreen, mainScreen, loginForm, teamCodeInput, userNameInput;
+let teamInfo, userInitial, usersList, messagesContainer, messageInput, sendBtn;
+let userMenuBtn, userDropdown, emojiPicker, settingsModal, callModal;
+let menuToggle, backBtn, sidebar, conversationOptions, fileInput, connectionStatus;
 
-// Test file input button
-document.addEventListener('DOMContentLoaded', () => {
-    console.log('DOM loaded, setting up file input...');
-    const fileInputElement = document.getElementById('file-input');
-    const attachButton = document.querySelector('.input-btn:has(.fa-paperclip)');
+
+
+// Handle login
+function handleLogin(e) {
+    e.preventDefault();
+    const teamCode = teamCodeInput?.value.trim();
+    const userName = userNameInput?.value.trim();
     
-    if (fileInputElement) {
-        console.log('File input found');
-        fileInputElement.addEventListener('change', handleFileSelect);
-    } else {
-        console.error('File input not found');
-    }
-    
-    // Alternative approach for paperclip button
-    const paperclipButtons = document.querySelectorAll('.input-btn');
-    paperclipButtons.forEach(btn => {
-        if (btn.innerHTML.includes('fa-paperclip')) {
-            console.log('Found paperclip button, adding click handler');
-            btn.addEventListener('click', () => {
-                console.log('Paperclip button clicked');
-                document.getElementById('file-input').click();
-            });
-        }
-    });
-});
-
-// Check for saved session on page load
-document.addEventListener('DOMContentLoaded', () => {
-    const savedSession = localStorage.getItem('myteams-session');
-    if (savedSession) {
-        try {
-            const session = JSON.parse(savedSession);
-            if (session.teamCode && session.userName) {
-                // Auto-login with saved credentials
-                teamCodeInput.value = session.teamCode;
-                userNameInput.value = session.userName;
-                
-                // Add a small delay to ensure socket connection is established
-                setTimeout(() => {
-                    socket.emit('join-team', { teamCode: session.teamCode, userName: session.userName });
-                }, 100);
-            }
-        } catch (error) {
-            console.error('Error parsing saved session:', error);
-            localStorage.removeItem('myteams-session');
-        }
-    }
-});
-
-// Handle page reload/refresh properly
-window.addEventListener('beforeunload', (e) => {
-    // Don't emit disconnect status on page reload, only on actual close
-    const savedSession = localStorage.getItem('myteams-session');
-    if (savedSession) {
-        // This is likely a refresh, not a logout
-        return;
-    } else {
-        // This is an actual logout, update status
-        if (currentUser) {
-            socket.emit('update-status', {
-                online: false
-            });
-        }
-    }
-});
-
-// Event listeners
-loginForm.addEventListener('submit', handleLogin);
-sendBtn.addEventListener('click', sendMessage);
-messageInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-        sendMessage();
-    }
-});
-messageInput.addEventListener('input', () => {
-    sendBtn.disabled = messageInput.value.trim() === '';
-});
-
-userMenuBtn.addEventListener('click', () => {
-    userDropdown.classList.toggle('hidden');
-});
-
-// Mobile menu toggle
-if (menuToggle) {
-    menuToggle.addEventListener('click', () => {
-        sidebar.classList.toggle('open');
-    });
-}
-
-// Back button for mobile
-if (backBtn) {
-    backBtn.addEventListener('click', () => {
-        sidebar.classList.add('open');
-    });
-}
-
-// Close dropdown when clicking outside
-document.addEventListener('click', (e) => {
-    if (!userMenuBtn.contains(e.target) && !userDropdown.contains(e.target)) {
-        userDropdown.classList.add('hidden');
-    }
-    
-    // Close conversation options when clicking outside
-    if (conversationOptions && !conversationOptions.contains(e.target) && 
-        !e.target.closest('.action-btn')) {
-        conversationOptions.classList.add('hidden');
-    }
-    
-    // Close sidebar when clicking outside on mobile
-    if (window.innerWidth <= 768 && sidebar.classList.contains('open') && 
-        !sidebar.contains(e.target) && !menuToggle.contains(e.target)) {
-        sidebar.classList.remove('open');
-    }
-});
-
-// Socket event listeners
-socket.on('join-success', (data) => {
-    currentUser = data.userName;
-    currentTeam = data.teamCode;
-    currentChatType = 'team';
-    currentChatId = currentTeam;
-    
-    showMainScreen();
-    teamInfo.textContent = `Team: ${currentTeam}`;
-    userInitial.textContent = currentUser.charAt(0).toUpperCase();
-    
-    // Set default chat header to team chat
-    document.getElementById('chat-user-initial').textContent = 'T';
-    document.getElementById('chat-user-name').textContent = 'Team Chat';
-    document.getElementById('chat-user-status').textContent = 'Team Channel';
-});
-
-socket.on('users-update', (updatedUsers) => {
-    console.log('Users updated:', updatedUsers.length, 'users');
-    users = updatedUsers;
-    renderUsersList();
-});
-
-socket.on('message-history', (data) => {
-    console.log('Message history received:', data);
-    if (data.chatId === currentChatId && data.chatType === currentChatType) {
-        messages = data.messages || [];
-        renderMessages();
-        console.log(`Loaded ${messages.length} messages for ${data.chatType} chat`);
-    }
-});
-
-socket.on('new-message', (message) => {
-    console.log('New message received:', message);
-    
-    // Check if this message belongs to the current chat
-    const belongsToCurrentChat = 
-        (message.chatType === 'team' && currentChatType === 'team' && message.teamCode === currentChatId) ||
-        (message.chatType === 'direct' && currentChatType === 'direct' && 
-         (message.userId === currentChatId || message.targetUserId === currentChatId || 
-          message.userKey === currentChatId || message.targetUserKey === currentChatId));
-    
-    if (belongsToCurrentChat) {
-        // Prevent duplicate messages
-        if (!messages.find(m => m.id === message.id)) {
-            messages.push(message);
-            renderMessages();
-            scrollToBottom();
-            console.log(`Added new message to current chat. Total: ${messages.length}`);
-        }
-    } else {
-        console.log('Message not for current chat, ignoring');
-    }
-});
-
-socket.on('unread-update', (data) => {
-    console.log('Unread update received:', data);
-    
-    // Map socket ID to user name for display
-    const senderUser = users.find(u => u.id === data.fromUserId);
-    if (senderUser) {
-        unreadCounts.set(senderUser.id, data.count);
-        console.log(`Unread count for ${senderUser.name}: ${data.count}`);
-    } else {
-        // If sender user not found, just store by socket ID
-        unreadCounts.set(data.fromUserId, data.count);
-    }
-    
-    renderUsersList();
-});
-
-socket.on('conversation-deleted', (data) => {
-    if (data.chatType === currentChatType) {
-        messages = [];
-        renderMessages();
-        
-        if (data.chatType === 'team') {
-            alert('Team conversation has been deleted.');
+    if (teamCode && userName && socket) {
+        if (socket.connected) {
+            // Save session to localStorage
+            localStorage.setItem('myteams-session', JSON.stringify({
+                teamCode: teamCode,
+                userName: userName
+            }));
+            
+            socket.emit('join-team', { teamCode, userName });
         } else {
-            alert('Conversation has been deleted.');
+            alert('Connection not ready. Please wait and try again.');
+            console.log('Socket not connected, cannot join team');
         }
-    }
-});
-
-socket.on('message-deleted', (data) => {
-    if (data.deleteFor === 'everyone') {
-        messages = messages.filter(msg => msg.id !== data.messageId);
-        renderMessages();
+    } else if (!socket) {
+        alert('Socket not initialized. Please refresh the page.');
     } else {
-        // Hide message for current user only
-        const messageElement = document.querySelector(`[data-message-id="${data.messageId}"]`);
-        if (messageElement) {
-            messageElement.style.display = 'none';
-        }
+        alert('Please enter both team code and name.');
     }
-});
+}
 
-socket.on('incoming-call', (data) => {
-    currentCallData = data;
-    showIncomingCall(data);
-});
 
-socket.on('call-answered', (data) => {
-    if (data.accepted) {
-        alert('Call accepted! Video calling functionality would be implemented here.');
-    } else {
-        alert('Call declined.');
-    }
-});
 
 // Functions
 function handleLogin(e) {
@@ -849,17 +951,7 @@ function previewPDF(pdfData, fileName) {
     }
 }
 
-// Add click listeners to emojis
-document.addEventListener('DOMContentLoaded', () => {
-    const emojiGrid = document.querySelector('.emoji-grid');
-    if (emojiGrid) {
-        emojiGrid.addEventListener('click', (e) => {
-            if (e.target.textContent.trim()) {
-                insertEmoji(e.target.textContent);
-            }
-        });
-    }
-});
+
 
 function initiateCall(callType) {
     const activeUser = document.querySelector('.user-item.active');
@@ -953,7 +1045,7 @@ function logout() {
 
 // Handle page visibility change for user status
 document.addEventListener('visibilitychange', () => {
-    if (currentUser && document.visibilityState === 'visible') {
+    if (currentUser && socket && document.visibilityState === 'visible') {
         // Page became visible, user is active
         socket.emit('update-status', {
             online: true
@@ -961,18 +1053,15 @@ document.addEventListener('visibilitychange', () => {
     }
 });
 
-// Remove the beforeunload status update to prevent cross-user refresh issues
-// The server will handle user disconnection properly through socket disconnect events
-
 // Close modals when clicking outside
 window.addEventListener('click', (e) => {
-    if (e.target === settingsModal) {
+    if (settingsModal && e.target === settingsModal) {
         closeSettings();
     }
-    if (e.target === callModal) {
+    if (callModal && e.target === callModal) {
         declineCall();
     }
-    if (!document.querySelector('.message-input').contains(e.target)) {
+    if (emojiPicker && !document.querySelector('.message-input').contains(e.target)) {
         emojiPicker.classList.add('hidden');
     }
 });

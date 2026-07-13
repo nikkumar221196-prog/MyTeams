@@ -1042,6 +1042,52 @@ body {
     z-index: 1;
 }
 
+/* Connection Status Indicator */
+.connection-status {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    padding: 0.5rem 1rem;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    z-index: 9999;
+    transition: all 0.3s;
+}
+
+.connection-status.connecting {
+    background-color: #ffd700;
+    color: #333;
+}
+
+.connection-status.connected {
+    background-color: #92c353;
+    color: white;
+}
+
+.connection-status.disconnected {
+    background-color: #d13438;
+    color: white;
+}
+
+.connection-status.error {
+    background-color: #ff6b6b;
+    color: white;
+}
+
+/* Hide connection status after successful connection */
+.connection-status.connected {
+    opacity: 1;
+    animation: fadeOut 2s ease-in-out 3s forwards;
+}
+
+@keyframes fadeOut {
+    to {
+        opacity: 0;
+        visibility: hidden;
+    }
+}
+
 /* Responsive Design */
 @media (max-width: 768px) {
     .menu-toggle {

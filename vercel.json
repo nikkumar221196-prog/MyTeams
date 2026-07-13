@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "functions": {
+    "api/socket.js": {
+      "maxDuration": 30
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/socket",
+      "dest": "/api/socket.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/public/$1"
+    }
+  ]
+}
