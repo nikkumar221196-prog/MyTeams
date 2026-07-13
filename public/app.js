@@ -77,23 +77,24 @@ function setupSocketEventListeners() {
     socket.on('join-success', (data) => {
         currentUser = data.userName;
         currentTeam = data.teamCode;
-        currentChatType = 'team';
-        currentChatId = currentTeam;
+        
+        // Don't override chat state if we're restoring from localStorage
+        if (!currentChatType || !currentChatId) {
+            currentChatType = 'team';
+            currentChatId = currentTeam;
+        }
         
         showMainScreen();
         if (teamInfo) teamInfo.textContent = `Team: ${currentTeam}`;
         if (userInitial) userInitial.textContent = currentUser.charAt(0).toUpperCase();
         
-        // Set default chat header to team chat
-        const chatUserInitial = document.getElementById('chat-user-initial');
-        const chatUserName = document.getElementById('chat-user-name');
-        const chatUserStatus = document.getElementById('chat-user-status');
-        
-        if (chatUserInitial) chatUserInitial.textContent = 'T';
-        if (chatUserName) chatUserName.textContent = 'Team Chat';
-        if (chatUserStatus) chatUserStatus.textContent = 'Team Channel';
-        
         console.log(`Successfully joined team ${currentTeam} as ${currentUser}`);
+        console.log(`Current chat state: type=${currentChatType}, id=${currentChatId}`);
+        
+        // Wait for users list before restoring chat
+        setTimeout(() => {
+            restoreChatState();
+        }, 1000);
     });
 
     socket.on('users-update', (updatedUsers) => {
@@ -114,13 +115,26 @@ function setupSocketEventListeners() {
 
     socket.on('new-message', (message) => {
         console.log('New message received:', message);
+        console.log('Current chat state:', { type: currentChatType, id: currentChatId });
         
         // Check if this message belongs to the current chat
-        const belongsToCurrentChat = 
-            (message.chatType === 'team' && currentChatType === 'team' && message.teamCode === currentChatId) ||
-            (message.chatType === 'direct' && currentChatType === 'direct' && 
-             (message.userId === currentChatId || message.targetUserId === currentChatId || 
-              message.userKey === currentChatId || message.targetUserKey === currentChatId));
+        let belongsToCurrentChat = false;
+        
+        if (message.chatType === 'team' && currentChatType === 'team' && message.teamCode === currentChatId) {
+            belongsToCurrentChat = true;
+            console.log('Message belongs to current team chat');
+        } else if (message.chatType === 'direct' && currentChatType === 'direct') {
+            // Check various ways the message could belong to current direct chat
+            if (message.userId === currentChatId || 
+                message.targetUserId === currentChatId || 
+                message.userKey === currentChatId || 
+                message.targetUserKey === currentChatId ||
+                (currentUser && (message.userName === currentUser || message.targetUserKey === `${currentTeam}:${currentUser}`.toLowerCase())) ||
+                (currentChatTarget && (message.userName === currentChatTarget.name || message.userKey === currentChatTarget.userKey))) {
+                belongsToCurrentChat = true;
+                console.log('Message belongs to current direct chat');
+            }
+        }
         
         if (belongsToCurrentChat) {
             // Prevent duplicate messages
@@ -129,9 +143,15 @@ function setupSocketEventListeners() {
                 renderMessages();
                 scrollToBottom();
                 console.log(`Added new message to current chat. Total: ${messages.length}`);
+            } else {
+                console.log('Duplicate message ignored');
             }
         } else {
-            console.log('Message not for current chat, but updating user list for notifications');
+            console.log('Message not for current chat - updating notifications only');
+            // Still update user list for unread indicators
+            if (users && users.length > 0) {
+                renderUsersList();
+            }
         }
     });
 
@@ -360,6 +380,21 @@ function handleAutoLogin() {
                 if (teamCodeInput) teamCodeInput.value = session.teamCode;
                 if (userNameInput) userNameInput.value = session.userName;
                 
+                // Restore chat state if available
+                const savedChatState = localStorage.getItem('myteams-chat-state');
+                if (savedChatState) {
+                    try {
+                        const chatState = JSON.parse(savedChatState);
+                        currentChatType = chatState.chatType || 'team';
+                        currentChatId = chatState.chatId || session.teamCode;
+                        currentChatTarget = chatState.chatTarget || null;
+                        console.log('Restored chat state:', chatState);
+                    } catch (error) {
+                        console.error('Error parsing chat state:', error);
+                        localStorage.removeItem('myteams-chat-state');
+                    }
+                }
+                
                 // If we're already connected, join immediately
                 if (socket && socket.connected) {
                     console.log('Socket already connected, joining team immediately...');
@@ -386,6 +421,7 @@ function handleAutoLogin() {
         } catch (error) {
             console.error('Error parsing saved session:', error);
             localStorage.removeItem('myteams-session');
+            localStorage.removeItem('myteams-chat-state');
         }
     }
 }
@@ -397,6 +433,7 @@ let users = [];
 let messages = [];
 let currentChatType = 'team'; // 'team' or 'direct'
 let currentChatId = null; // team code for team chat, user id for direct chat
+let currentChatTarget = null; // Store current chat target info for restoration
 let currentCallData = null;
 let unreadCounts = new Map(); // Track unread messages
 
@@ -524,19 +561,34 @@ function selectUser(user) {
     // Switch to direct chat
     currentChatType = 'direct';
     currentChatId = targetUserId;
+    currentChatTarget = {
+        name: user.name,
+        userKey: user.userKey,
+        online: user.online,
+        lastSeen: user.lastSeen
+    };
+    
+    // Save chat state
+    saveChatState();
     
     // Update chat header
-    document.getElementById('chat-user-initial').textContent = user.name.charAt(0).toUpperCase();
-    document.getElementById('chat-user-name').textContent = user.name;
-    document.getElementById('chat-user-status').textContent = user.online ? 'Online' : `Last seen ${formatTime(user.lastSeen)}`;
+    const chatUserInitial = document.getElementById('chat-user-initial');
+    const chatUserName = document.getElementById('chat-user-name');
+    const chatUserStatus = document.getElementById('chat-user-status');
+    
+    if (chatUserInitial) chatUserInitial.textContent = user.name.charAt(0).toUpperCase();
+    if (chatUserName) chatUserName.textContent = user.name;
+    if (chatUserStatus) chatUserStatus.textContent = user.online ? 'Online' : `Last seen ${formatTime(user.lastSeen)}`;
     
     // Update active state
     document.querySelectorAll('.user-item').forEach(item => item.classList.remove('active'));
-    event.currentTarget.classList.add('active');
+    if (event && event.currentTarget) {
+        event.currentTarget.classList.add('active');
+    }
     
     // Clear messages and request direct message history
     messages = [];
-    messagesContainer.innerHTML = '';
+    if (messagesContainer) messagesContainer.innerHTML = '';
     
     if (user.online && user.id) {
         // User is online, request normally
@@ -554,8 +606,8 @@ function selectUser(user) {
     }
     
     // Hide sidebar on mobile
-    if (window.innerWidth <= 768) {
-        document.querySelector('.sidebar').classList.remove('open');
+    if (window.innerWidth <= 768 && sidebar) {
+        sidebar.classList.remove('open');
     }
 }
 
@@ -563,26 +615,111 @@ function selectTeamChat() {
     // Switch to team chat
     currentChatType = 'team';
     currentChatId = currentTeam;
+    currentChatTarget = null;
+    
+    // Save chat state
+    saveChatState();
     
     // Update chat header
-    document.getElementById('chat-user-initial').textContent = 'T';
-    document.getElementById('chat-user-name').textContent = 'Team Chat';
-    document.getElementById('chat-user-status').textContent = 'Team Channel';
+    const chatUserInitial = document.getElementById('chat-user-initial');
+    const chatUserName = document.getElementById('chat-user-name');
+    const chatUserStatus = document.getElementById('chat-user-status');
+    
+    if (chatUserInitial) chatUserInitial.textContent = 'T';
+    if (chatUserName) chatUserName.textContent = 'Team Chat';
+    if (chatUserStatus) chatUserStatus.textContent = 'Team Channel';
     
     // Update active state
     document.querySelectorAll('.user-item').forEach(item => item.classList.remove('active'));
-    document.querySelector('.team-avatar').parentElement.classList.add('active');
+    const teamChatItem = document.querySelector('.team-avatar');
+    if (teamChatItem && teamChatItem.parentElement) {
+        teamChatItem.parentElement.classList.add('active');
+    }
     
     // Clear messages and show team messages
     messages = [];
-    messagesContainer.innerHTML = '';
+    if (messagesContainer) messagesContainer.innerHTML = '';
     
     // Request team message history
     socket.emit('join-team', { teamCode: currentTeam, userName: currentUser });
     
     // Hide sidebar on mobile
-    if (window.innerWidth <= 768) {
-        document.querySelector('.sidebar').classList.remove('open');
+    if (window.innerWidth <= 768 && sidebar) {
+        sidebar.classList.remove('open');
+    }
+}
+
+// Save current chat state
+function saveChatState() {
+    const chatState = {
+        chatType: currentChatType,
+        chatId: currentChatId,
+        chatTarget: currentChatTarget
+    };
+    localStorage.setItem('myteams-chat-state', JSON.stringify(chatState));
+    console.log('Saved chat state:', chatState);
+}
+
+// Restore chat state after login
+function restoreChatState() {
+    console.log('Restoring chat state...');
+    
+    if (currentChatType === 'direct' && currentChatTarget) {
+        // Find the user in the current users list
+        const targetUser = users.find(u => u.userKey === currentChatTarget.userKey);
+        
+        if (targetUser) {
+            // User is online, switch to their chat
+            console.log('Restoring direct chat with online user:', targetUser.name);
+            
+            // Update chat header
+            const chatUserInitial = document.getElementById('chat-user-initial');
+            const chatUserName = document.getElementById('chat-user-name');
+            const chatUserStatus = document.getElementById('chat-user-status');
+            
+            if (chatUserInitial) chatUserInitial.textContent = targetUser.name.charAt(0).toUpperCase();
+            if (chatUserName) chatUserName.textContent = targetUser.name;
+            if (chatUserStatus) chatUserStatus.textContent = targetUser.online ? 'Online' : `Last seen ${formatTime(targetUser.lastSeen)}`;
+            
+            // Update currentChatId to the current socket ID
+            currentChatId = targetUser.id;
+            
+            // Request message history
+            socket.emit('get-direct-messages', { targetUserId: targetUser.id });
+        } else {
+            // User is offline, but we can still show chat
+            console.log('Restoring direct chat with offline user:', currentChatTarget.name);
+            
+            // Update chat header
+            const chatUserInitial = document.getElementById('chat-user-initial');
+            const chatUserName = document.getElementById('chat-user-name');
+            const chatUserStatus = document.getElementById('chat-user-status');
+            
+            if (chatUserInitial) chatUserInitial.textContent = currentChatTarget.name.charAt(0).toUpperCase();
+            if (chatUserName) chatUserName.textContent = currentChatTarget.name;
+            if (chatUserStatus) chatUserStatus.textContent = `Last seen ${formatTime(currentChatTarget.lastSeen)}`;
+            
+            // Use userKey for offline user
+            currentChatId = currentChatTarget.userKey;
+            
+            // Request message history by key
+            socket.emit('get-direct-messages-by-key', { targetUserKey: currentChatTarget.userKey });
+        }
+        
+        // Update active state in sidebar
+        setTimeout(() => {
+            document.querySelectorAll('.user-item').forEach(item => {
+                const userName = item.querySelector('.user-info h4');
+                if (userName && userName.textContent === currentChatTarget.name) {
+                    item.classList.add('active');
+                }
+            });
+        }, 500);
+        
+    } else {
+        // Default to team chat
+        console.log('Restoring team chat');
+        selectTeamChat();
     }
 }
 

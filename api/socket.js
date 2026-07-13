@@ -143,9 +143,19 @@ module.exports = function handler(req, res) {
 
             socket.on('send-message', (data) => {
                 const user = users.get(socket.id);
-                if (!user) return;
+                if (!user) {
+                    console.log('User not found for socket:', socket.id);
+                    return;
+                }
                 
                 const { text, file, chatType, targetUserId, targetUserKey } = data;
+                console.log(`Processing message from ${user.name}:`, { 
+                    hasText: !!text, 
+                    hasFile: !!file, 
+                    chatType, 
+                    targetUserId, 
+                    targetUserKey 
+                });
                 
                 const message = {
                     id: uuidv4(),
@@ -186,7 +196,10 @@ module.exports = function handler(req, res) {
                         }
                     }
                     
-                    if (!targetUser) return;
+                    if (!targetUser) {
+                        console.log('Target user not found');
+                        return;
+                    }
                     
                     if (!directMessages.has(chatId)) {
                         directMessages.set(chatId, []);
@@ -197,16 +210,26 @@ module.exports = function handler(req, res) {
                         targetUserKey: targetUser.userKey || targetUserKey
                     });
                     
-                    // Emit to sender
-                    socket.emit('new-message', message);
+                    console.log(`Direct message saved to ${chatId}, total messages: ${directMessages.get(chatId).length}`);
                     
-                    // Emit to target if online
+                    // Send to sender immediately
+                    socket.emit('new-message', message);
+                    console.log('Sent message to sender');
+                    
+                    // Send to target if online
                     if (targetUser.online !== false && targetUserId) {
+                        console.log('Sending message to target user:', targetUserId);
                         io.to(targetUserId).emit('new-message', message);
+                    } else {
+                        console.log('Target user is offline, message saved for later');
                     }
                     
-                    // Broadcast to all team members so they can update unread counts
-                    socket.broadcast.to(user.teamCode).emit('new-message', message);
+                    // Also broadcast to other team members so they see activity
+                    socket.broadcast.to(user.teamCode).emit('message-activity', {
+                        fromUser: user.name,
+                        toUser: targetUser.name || 'Unknown',
+                        timestamp: message.timestamp
+                    });
                     
                 } else {
                     // Team message
@@ -215,12 +238,12 @@ module.exports = function handler(req, res) {
                     }
                     
                     messages.get(user.teamCode).push(message);
+                    console.log(`Team message saved for ${user.teamCode}, total messages: ${messages.get(user.teamCode).length}`);
                     
-                    // Broadcast to all team members
+                    // Broadcast to all team members including sender
                     io.to(user.teamCode).emit('new-message', message);
+                    console.log('Broadcast team message to all team members');
                 }
-                
-                console.log(`Message sent by ${user.name} in ${chatType} chat`);
             });
 
             socket.on('get-direct-messages', (data) => {
