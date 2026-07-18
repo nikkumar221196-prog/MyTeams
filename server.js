@@ -8,16 +8,31 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const server = http.createServer(app);
+
+// Configure Socket.io for Render.com
 const io = socketIo(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
-  }
+  },
+  transports: ['websocket', 'polling'],
+  allowEIO3: true,
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Health check endpoint for Render
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'OK', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
 
 // Data persistence
 const DATA_DIR = './data';
@@ -754,6 +769,10 @@ app.post('/api/settings/auto-delete', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+const HOST = process.env.HOST || '0.0.0.0';
+
+server.listen(PORT, HOST, () => {
+  console.log(`🚀 MyTeams Server running on ${HOST}:${PORT}`);
+  console.log(`📱 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🌐 Health check: http://localhost:${PORT}/health`);
 });

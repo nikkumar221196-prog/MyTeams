@@ -1,7 +1,7 @@
 // Socket.io connection for Vercel with initialization
 let socket;
 
-// Initialize Socket.io connection
+// Initialize Socket.io connection for Render.com
 function initializeSocket() {
     console.log('Initializing Socket.io connection...');
     
@@ -11,7 +11,6 @@ function initializeSocket() {
     }
     
     socket = io({
-        path: '/api/socket',
         transports: ['websocket', 'polling'],
         timeout: 20000,
         forceNew: true,
