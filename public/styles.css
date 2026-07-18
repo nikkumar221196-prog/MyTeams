@@ -1141,3 +1141,44 @@ body {
         height: 32px;
     }
 }
+
+.connection-status {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    padding: 8px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 500;
+    z-index: 10000;
+    transition: all 0.3s ease;
+}
+
+.connection-status.connected {
+    background-color: #28a745;
+    color: white;
+}
+
+.connection-status.connecting {
+    background-color: #ffc107;
+    color: #212529;
+}
+
+.connection-status.disconnected {
+    background-color: #dc3545;
+    color: white;
+}
+
+.connection-status.error {
+    background-color: #e74c3c;
+    color: white;
+}
+
+/* Message optimistic styling */
+.message.optimistic {
+    opacity: 0.7;
+}
+
+.message.optimistic .message-content {
+    font-style: italic;
+}

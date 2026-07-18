@@ -67,10 +67,12 @@ module.exports = function handler(req, res) {
                 origin: "*",
                 methods: ["GET", "POST"]
             },
-            transports: ['websocket', 'polling'],
+            transports: ['polling', 'websocket'],
             allowEIO3: true,
-            pingTimeout: 60000,
-            pingInterval: 25000
+            pingTimeout: 120000,
+            pingInterval: 25000,
+            upgradeTimeout: 30000,
+            maxHttpBufferSize: 1e6
         });
 
         // Store the IO instance globally
@@ -82,6 +84,7 @@ module.exports = function handler(req, res) {
 
             socket.on('join-team', (data) => {
                 const { teamCode, userName } = data;
+                console.log(`Join request: ${userName} joining ${teamCode}`);
                 
                 if (!teams.has(teamCode)) {
                     teams.set(teamCode, new Set());
@@ -89,11 +92,14 @@ module.exports = function handler(req, res) {
                 
                 const userKey = getUserKey(teamCode, userName);
                 
+                // Remove existing session for this user
                 if (userSessions.has(userKey)) {
                     const existingSocketId = userSessions.get(userKey);
                     if (users.has(existingSocketId)) {
-                        teams.get(teamCode).delete(existingSocketId);
+                        const oldTeamCode = users.get(existingSocketId).teamCode;
+                        teams.get(oldTeamCode)?.delete(existingSocketId);
                         users.delete(existingSocketId);
+                        console.log(`Removed old session for ${userName}`);
                     }
                 }
                 
@@ -125,37 +131,36 @@ module.exports = function handler(req, res) {
                     unreadCounts.set(socket.id, new Map());
                 }
                 
-                // Send message history
+                // Send message history immediately
                 if (messages.has(teamCode)) {
+                    const teamMessages = messages.get(teamCode);
                     socket.emit('message-history', {
                         chatType: 'team',
                         chatId: teamCode,
-                        messages: messages.get(teamCode)
+                        messages: teamMessages
                     });
+                    console.log(`Sent ${teamMessages.length} team messages to ${userName}`);
                 }
                 
                 const allUsersInTeam = getAllTeamUsers(teamCode);
+                console.log(`Broadcasting user list update to team ${teamCode}: ${allUsersInTeam.length} users`);
                 io.to(teamCode).emit('users-update', allUsersInTeam);
                 
                 socket.emit('join-success', { teamCode, userName });
-                console.log(`User ${userName} joined team ${teamCode}`);
+                console.log(`${userName} successfully joined ${teamCode}`);
             });
 
             socket.on('send-message', (data) => {
                 const user = users.get(socket.id);
                 if (!user) {
-                    console.log('User not found for socket:', socket.id);
+                    console.log('ERROR: User not found for socket:', socket.id);
+                    socket.emit('error', { message: 'User session not found' });
                     return;
                 }
                 
                 const { text, file, chatType, targetUserId, targetUserKey } = data;
-                console.log(`Processing message from ${user.name}:`, { 
-                    hasText: !!text, 
-                    hasFile: !!file, 
-                    chatType, 
-                    targetUserId, 
-                    targetUserKey 
-                });
+                console.log(`\n=== MESSAGE FROM ${user.name} ===`);
+                console.log('Message data:', { text, chatType, targetUserId, targetUserKey });
                 
                 const message = {
                     id: uuidv4(),
@@ -172,6 +177,7 @@ module.exports = function handler(req, res) {
                 };
                 
                 if (chatType === 'direct' && (targetUserId || targetUserKey)) {
+                    // DIRECT MESSAGE HANDLING
                     let targetUser = null;
                     let chatId = null;
                     
@@ -179,9 +185,13 @@ module.exports = function handler(req, res) {
                         targetUser = users.get(targetUserId);
                         if (targetUser) {
                             chatId = getDirectChatId(user.userKey, targetUser.userKey);
+                            console.log(`Direct message to ONLINE user: ${targetUser.name} (${targetUserId})`);
+                        } else {
+                            console.log('ERROR: Target user ID not found:', targetUserId);
                         }
                     } else if (targetUserKey) {
                         chatId = getDirectChatId(user.userKey, targetUserKey);
+                        console.log(`Direct message to OFFLINE user: ${targetUserKey}`);
                         
                         if (allTeamUsers.has(user.teamCode)) {
                             const teamUserData = allTeamUsers.get(user.teamCode);
@@ -197,7 +207,8 @@ module.exports = function handler(req, res) {
                     }
                     
                     if (!targetUser) {
-                        console.log('Target user not found');
+                        console.log('ERROR: Could not identify target user');
+                        socket.emit('error', { message: 'Target user not found' });
                         return;
                     }
                     
@@ -205,45 +216,54 @@ module.exports = function handler(req, res) {
                         directMessages.set(chatId, []);
                     }
                     
-                    directMessages.get(chatId).push({
+                    // Store message
+                    const storedMessage = {
                         ...message,
                         targetUserKey: targetUser.userKey || targetUserKey
-                    });
+                    };
+                    directMessages.get(chatId).push(storedMessage);
+                    console.log(`Stored message in chat ${chatId}. Total messages: ${directMessages.get(chatId).length}`);
                     
-                    console.log(`Direct message saved to ${chatId}, total messages: ${directMessages.get(chatId).length}`);
-                    
-                    // Send to sender immediately
+                    // Send to sender (should appear immediately on sender's screen)
+                    console.log('Sending message back to sender...');
                     socket.emit('new-message', message);
-                    console.log('Sent message to sender');
                     
                     // Send to target if online
                     if (targetUser.online !== false && targetUserId) {
-                        console.log('Sending message to target user:', targetUserId);
-                        io.to(targetUserId).emit('new-message', message);
+                        console.log(`Sending message to online target: ${targetUserId}`);
+                        socket.to(targetUserId).emit('new-message', message);
+                        
+                        // Verify the target socket exists
+                        const targetSocket = io.sockets.sockets.get(targetUserId);
+                        if (targetSocket) {
+                            console.log(`Target socket confirmed: ${targetUserId}`);
+                        } else {
+                            console.log(`WARNING: Target socket not found: ${targetUserId}`);
+                        }
                     } else {
-                        console.log('Target user is offline, message saved for later');
+                        console.log('Target user offline, message saved for later delivery');
                     }
                     
-                    // Also broadcast to other team members so they see activity
-                    socket.broadcast.to(user.teamCode).emit('message-activity', {
-                        fromUser: user.name,
-                        toUser: targetUser.name || 'Unknown',
-                        timestamp: message.timestamp
-                    });
-                    
                 } else {
-                    // Team message
+                    // TEAM MESSAGE HANDLING
+                    console.log(`Team message in ${user.teamCode}`);
+                    
                     if (!messages.has(user.teamCode)) {
                         messages.set(user.teamCode, []);
                     }
                     
                     messages.get(user.teamCode).push(message);
-                    console.log(`Team message saved for ${user.teamCode}, total messages: ${messages.get(user.teamCode).length}`);
+                    console.log(`Stored team message. Total: ${messages.get(user.teamCode).length}`);
                     
-                    // Broadcast to all team members including sender
+                    // Send to all team members INCLUDING sender
+                    console.log(`Broadcasting to team ${user.teamCode}`);
                     io.to(user.teamCode).emit('new-message', message);
-                    console.log('Broadcast team message to all team members');
+                    
+                    // Also send directly to sender to ensure they see it
+                    socket.emit('new-message', message);
                 }
+                
+                console.log('=== MESSAGE PROCESSING COMPLETE ===\n');
             });
 
             socket.on('get-direct-messages', (data) => {
@@ -251,14 +271,27 @@ module.exports = function handler(req, res) {
                 const currentUser = users.get(socket.id);
                 const targetUser = users.get(targetUserId);
                 
-                if (!currentUser || !targetUser) return;
+                console.log(`Direct message history request: ${currentUser?.name} -> ${targetUser?.name}`);
+                
+                if (!currentUser) {
+                    console.log('ERROR: Current user not found');
+                    return;
+                }
+                
+                if (!targetUser) {
+                    console.log('ERROR: Target user not found for ID:', targetUserId);
+                    return;
+                }
                 
                 const chatId = getDirectChatId(currentUser.userKey, targetUser.userKey);
+                const chatMessages = directMessages.get(chatId) || [];
+                
+                console.log(`Sending ${chatMessages.length} direct messages for chat ${chatId}`);
                 
                 socket.emit('message-history', {
                     chatType: 'direct',
                     chatId: targetUserId,
-                    messages: directMessages.get(chatId) || []
+                    messages: chatMessages
                 });
             });
 
@@ -266,14 +299,22 @@ module.exports = function handler(req, res) {
                 const { targetUserKey } = data;
                 const currentUser = users.get(socket.id);
                 
-                if (!currentUser) return;
+                console.log(`Direct message history by key: ${currentUser?.name} -> ${targetUserKey}`);
+                
+                if (!currentUser) {
+                    console.log('ERROR: Current user not found');
+                    return;
+                }
                 
                 const chatId = getDirectChatId(currentUser.userKey, targetUserKey);
+                const chatMessages = directMessages.get(chatId) || [];
+                
+                console.log(`Sending ${chatMessages.length} direct messages for chat ${chatId}`);
                 
                 socket.emit('message-history', {
                     chatType: 'direct',
                     chatId: targetUserKey,
-                    messages: directMessages.get(chatId) || []
+                    messages: chatMessages
                 });
             });
 
@@ -282,7 +323,9 @@ module.exports = function handler(req, res) {
                 if (!user) return;
                 
                 const { messageId, deleteFor } = data;
+                console.log(`Delete message: ${messageId} by ${user.name} (${deleteFor})`);
                 
+                // Check team messages
                 if (messages.has(user.teamCode)) {
                     const teamMessages = messages.get(user.teamCode);
                     const messageIndex = teamMessages.findIndex(msg => msg.id === messageId);
@@ -302,6 +345,7 @@ module.exports = function handler(req, res) {
                     }
                 }
                 
+                // Check direct messages
                 directMessages.forEach((chatMessages, chatId) => {
                     const messageIndex = chatMessages.findIndex(msg => msg.id === messageId);
                     if (messageIndex !== -1) {
@@ -324,6 +368,7 @@ module.exports = function handler(req, res) {
                 if (!user) return;
                 
                 const { chatType, teamCode, targetId } = data;
+                console.log(`Delete conversation: ${chatType} by ${user.name}`);
                 
                 if (chatType === 'team' && teamCode === user.teamCode) {
                     if (messages.has(teamCode)) {
@@ -346,15 +391,18 @@ module.exports = function handler(req, res) {
                         directMessages.set(chatId, []);
                         socket.emit('conversation-deleted', { chatType: 'direct', targetId: targetId });
                         if (targetId && !targetId.includes(':')) {
-                            io.to(targetId).emit('conversation-deleted', { chatType: 'direct', targetId: socket.id });
+                            socket.to(targetId).emit('conversation-deleted', { chatType: 'direct', targetId: socket.id });
                         }
                     }
                 }
             });
 
-            socket.on('disconnect', () => {
+            socket.on('disconnect', (reason) => {
+                console.log(`User disconnected: ${socket.id}, reason: ${reason}`);
                 const user = users.get(socket.id);
                 if (user) {
+                    console.log(`Cleaning up user: ${user.name}`);
+                    
                     if (allTeamUsers.has(user.teamCode)) {
                         const teamUserData = allTeamUsers.get(user.teamCode);
                         if (teamUserData.has(user.userKey)) {
@@ -375,8 +423,6 @@ module.exports = function handler(req, res) {
                     teams.get(user.teamCode)?.delete(socket.id);
                     users.delete(socket.id);
                     unreadCounts.delete(socket.id);
-                    
-                    console.log(`User ${user.name} disconnected`);
                 }
             });
         });

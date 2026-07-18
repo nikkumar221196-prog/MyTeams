@@ -43,8 +43,8 @@ function initializeSocket() {
         }
     });
 
-    socket.on('disconnect', () => {
-        console.log('Socket.io disconnected');
+    socket.on('disconnect', (reason) => {
+        console.log('Socket.io disconnected, reason:', reason);
         if (connectionStatus) {
             connectionStatus.textContent = 'Reconnecting...';
             connectionStatus.className = 'connection-status disconnected';
@@ -59,11 +59,22 @@ function initializeSocket() {
         }
     });
 
+    socket.on('error', (error) => {
+        console.error('Socket.io error:', error);
+        alert('Error: ' + error.message);
+    });
+
     socket.on('reconnect', (attemptNumber) => {
         console.log('Socket.io reconnected after', attemptNumber, 'attempts');
         if (connectionStatus) {
             connectionStatus.textContent = 'Connected';
             connectionStatus.className = 'connection-status connected';
+        }
+        
+        // Rejoin team after reconnection
+        if (currentUser && currentTeam) {
+            console.log('Rejoining team after reconnection...');
+            socket.emit('join-team', { teamCode: currentTeam, userName: currentUser });
         }
     });
 
@@ -114,25 +125,43 @@ function setupSocketEventListeners() {
     });
 
     socket.on('new-message', (message) => {
-        console.log('New message received:', message);
-        console.log('Current chat state:', { type: currentChatType, id: currentChatId });
+        console.log('\n=== NEW MESSAGE RECEIVED ===');
+        console.log('Message:', message);
+        console.log('Current chat state:', { type: currentChatType, id: currentChatId, target: currentChatTarget });
+        
+        // Remove any optimistic message with same text and recent timestamp
+        if (message.text) {
+            const optimisticIndex = messages.findIndex(m => 
+                m.isOptimistic && 
+                m.text === message.text && 
+                Math.abs(m.timestamp - message.timestamp) < 5000
+            );
+            if (optimisticIndex !== -1) {
+                messages.splice(optimisticIndex, 1);
+                console.log('Removed optimistic message');
+            }
+        }
         
         // Check if this message belongs to the current chat
         let belongsToCurrentChat = false;
         
         if (message.chatType === 'team' && currentChatType === 'team' && message.teamCode === currentChatId) {
             belongsToCurrentChat = true;
-            console.log('Message belongs to current team chat');
+            console.log('✓ Message belongs to current team chat');
         } else if (message.chatType === 'direct' && currentChatType === 'direct') {
-            // Check various ways the message could belong to current direct chat
-            if (message.userId === currentChatId || 
-                message.targetUserId === currentChatId || 
-                message.userKey === currentChatId || 
-                message.targetUserKey === currentChatId ||
-                (currentUser && (message.userName === currentUser || message.targetUserKey === `${currentTeam}:${currentUser}`.toLowerCase())) ||
-                (currentChatTarget && (message.userName === currentChatTarget.name || message.userKey === currentChatTarget.userKey))) {
+            // For direct messages, check multiple conditions
+            const isFromMe = message.userName === currentUser;
+            const isToMe = message.targetUserKey && currentUser && 
+                          message.targetUserKey === `${currentTeam}:${currentUser}`.toLowerCase();
+            const isFromCurrentTarget = currentChatTarget && message.userName === currentChatTarget.name;
+            const isToCurrentTarget = message.targetUserId === currentChatId || 
+                                    message.targetUserKey === currentChatId;
+            
+            if (isFromMe || isToMe || isFromCurrentTarget || isToCurrentTarget) {
                 belongsToCurrentChat = true;
-                console.log('Message belongs to current direct chat');
+                console.log('✓ Message belongs to current direct chat', {
+                    isFromMe, isToMe, isFromCurrentTarget, isToCurrentTarget
+                });
             }
         }
         
@@ -142,17 +171,19 @@ function setupSocketEventListeners() {
                 messages.push(message);
                 renderMessages();
                 scrollToBottom();
-                console.log(`Added new message to current chat. Total: ${messages.length}`);
+                console.log(`✓ Added message to chat. Total: ${messages.length}`);
             } else {
-                console.log('Duplicate message ignored');
+                console.log('! Duplicate message ignored');
             }
         } else {
-            console.log('Message not for current chat - updating notifications only');
+            console.log('- Message not for current chat');
             // Still update user list for unread indicators
             if (users && users.length > 0) {
                 renderUsersList();
             }
         }
+        
+        console.log('=== MESSAGE PROCESSING COMPLETE ===\n');
     });
 
     socket.on('unread-update', (data) => {
@@ -725,7 +756,9 @@ function restoreChatState() {
 
 function sendMessage() {
     const text = messageInput.value.trim();
-    console.log('Send message clicked, text:', text);
+    console.log('=== SENDING MESSAGE ===');
+    console.log('Message text:', text);
+    console.log('Current chat state:', { type: currentChatType, id: currentChatId });
     
     if (text) {
         const messageData = {
@@ -746,10 +779,39 @@ function sendMessage() {
             }
         }
         
-        console.log('Sending message data:', messageData);
-        socket.emit('send-message', messageData);
+        console.log('Final message data:', messageData);
+        
+        // Optimistically add message to UI (will be replaced when server confirms)
+        const optimisticMessage = {
+            id: 'temp-' + Date.now(),
+            userId: socket?.id || 'temp',
+            userKey: currentUser ? `${currentTeam}:${currentUser}`.toLowerCase() : 'temp',
+            userName: currentUser || 'You',
+            text: text,
+            timestamp: Date.now(),
+            teamCode: currentTeam,
+            chatType: currentChatType,
+            isOptimistic: true
+        };
+        
+        // Add optimistic message
+        if (!messages.find(m => m.text === text && Math.abs(m.timestamp - optimisticMessage.timestamp) < 1000)) {
+            messages.push(optimisticMessage);
+            renderMessages();
+            scrollToBottom();
+        }
+        
+        // Send to server
+        if (socket && socket.connected) {
+            socket.emit('send-message', messageData);
+            console.log('Message sent to server');
+        } else {
+            console.error('Socket not connected!');
+            alert('Connection lost. Please refresh the page.');
+        }
+        
         messageInput.value = '';
-        sendBtn.disabled = true;
+        if (sendBtn) sendBtn.disabled = true;
     } else {
         console.log('No text to send');
     }
