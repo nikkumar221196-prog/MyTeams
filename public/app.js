@@ -84,23 +84,43 @@ function initializeSocket() {
     });
 
     socket.on('session-expired', () => {
-        console.log('Session expired event received');
+        console.log('\n=== SESSION EXPIRED ===');
+        console.log('Attempting automatic recovery...');
+        
         const savedSession = localStorage.getItem('myteams-session');
         if (savedSession) {
             try {
                 const session = JSON.parse(savedSession);
                 if (session.teamCode && session.userName) {
-                    console.log('Attempting to rejoin team after session expiry...');
-                    socket.emit('join-team', { teamCode: session.teamCode, userName: session.userName });
+                    console.log(`Rejoining team ${session.teamCode} as ${session.userName}...`);
+                    
+                    // Wait a moment for socket to be ready
+                    setTimeout(() => {
+                        if (socket && socket.connected) {
+                            socket.emit('join-team', { teamCode: session.teamCode, userName: session.userName });
+                            console.log('Rejoin request sent');
+                        } else {
+                            console.error('Socket not connected for rejoin');
+                            alert('Connection lost. Please refresh the page.');
+                        }
+                    }, 1000);
+                } else {
+                    console.error('Invalid session data');
+                    alert('Session expired. Please log in again.');
+                    location.reload();
                 }
             } catch (error) {
                 console.error('Error parsing session:', error);
-                alert('Session expired. Please refresh the page.');
+                alert('Session error. Please refresh the page.');
+                location.reload();
             }
         } else {
+            console.log('No saved session found');
             alert('Session expired. Please log in again.');
             location.reload();
         }
+        
+        console.log('=== SESSION RECOVERY ATTEMPT COMPLETE ===\n');
     });
 
     socket.on('reconnect', (attemptNumber) => {
@@ -125,6 +145,9 @@ function initializeSocket() {
 function setupSocketEventListeners() {
     // Socket event listeners
     socket.on('join-success', (data) => {
+        console.log('\n=== JOIN SUCCESS ===');
+        console.log('Joined team:', data);
+        
         currentUser = data.userName;
         currentTeam = data.teamCode;
         
@@ -141,16 +164,47 @@ function setupSocketEventListeners() {
         console.log(`Successfully joined team ${currentTeam} as ${currentUser}`);
         console.log(`Current chat state: type=${currentChatType}, id=${currentChatId}`);
         
+        // Request immediate user list update to ensure online status is visible
+        setTimeout(() => {
+            console.log('Requesting user status refresh...');
+            socket.emit('refresh-users');
+        }, 500);
+        
         // Wait for users list before restoring chat
         setTimeout(() => {
             restoreChatState();
-        }, 1000);
+        }, 1500);
+        
+        console.log('=== JOIN SUCCESS COMPLETE ===\n');
     });
 
     socket.on('users-update', (updatedUsers) => {
-        console.log('Users updated:', updatedUsers.length, 'users');
+        console.log('\n=== USERS UPDATE RECEIVED ===');
+        console.log('Updated users:', updatedUsers.length, 'users');
+        console.log('Users data:', updatedUsers.map(u => `${u.name}(${u.online ? 'online' : 'offline'})`));
+        
         users = updatedUsers;
         renderUsersList();
+        
+        // If we have a current chat target, update their online status
+        if (currentChatTarget) {
+            const updatedTarget = users.find(u => u.userKey === currentChatTarget.userKey || u.name === currentChatTarget.name);
+            if (updatedTarget) {
+                currentChatTarget.online = updatedTarget.online;
+                currentChatTarget.lastSeen = updatedTarget.lastSeen;
+                currentChatTarget.id = updatedTarget.id;
+                
+                // Update chat header status
+                const chatUserStatus = document.getElementById('chat-user-status');
+                if (chatUserStatus && currentChatType === 'direct') {
+                    chatUserStatus.textContent = updatedTarget.online ? 'Online' : `Last seen ${formatTime(updatedTarget.lastSeen)}`;
+                }
+                
+                console.log(`Updated current chat target status: ${updatedTarget.name} is ${updatedTarget.online ? 'online' : 'offline'}`);
+            }
+        }
+        
+        console.log('=== USERS UPDATE COMPLETE ===\n');
     });
 
     socket.on('message-history', (data) => {

@@ -84,22 +84,27 @@ module.exports = function handler(req, res) {
 
             socket.on('join-team', (data) => {
                 const { teamCode, userName } = data;
-                console.log(`Join request: ${userName} joining ${teamCode}`);
+                console.log(`\n=== JOIN TEAM REQUEST ===`);
+                console.log(`User: ${userName}, Team: ${teamCode}, Socket: ${socket.id}`);
                 
                 if (!teams.has(teamCode)) {
                     teams.set(teamCode, new Set());
+                    console.log(`Created new team: ${teamCode}`);
                 }
                 
                 const userKey = getUserKey(teamCode, userName);
+                console.log(`User key: ${userKey}`);
                 
-                // Remove existing session for this user
+                // Clean up any existing session for this user
                 if (userSessions.has(userKey)) {
                     const existingSocketId = userSessions.get(userKey);
-                    if (users.has(existingSocketId)) {
+                    console.log(`Found existing session for ${userName}: ${existingSocketId}`);
+                    
+                    if (users.has(existingSocketId) && existingSocketId !== socket.id) {
                         const oldTeamCode = users.get(existingSocketId).teamCode;
                         teams.get(oldTeamCode)?.delete(existingSocketId);
                         users.delete(existingSocketId);
-                        console.log(`Removed old session for ${userName}`);
+                        console.log(`Cleaned up old session: ${existingSocketId}`);
                     }
                 }
                 
@@ -112,11 +117,13 @@ module.exports = function handler(req, res) {
                     lastSeen: Date.now()
                 };
                 
+                // Store user in all maps
                 users.set(socket.id, user);
                 teams.get(teamCode).add(socket.id);
                 userSessions.set(userKey, socket.id);
                 socket.join(teamCode);
                 
+                // Update persistent user data
                 if (!allTeamUsers.has(teamCode)) {
                     allTeamUsers.set(teamCode, new Map());
                 }
@@ -131,6 +138,10 @@ module.exports = function handler(req, res) {
                     unreadCounts.set(socket.id, new Map());
                 }
                 
+                console.log(`✓ User ${userName} joined team ${teamCode}`);
+                console.log(`Team size: ${teams.get(teamCode).size}`);
+                console.log(`Total online users: ${users.size}`);
+                
                 // Send message history immediately
                 if (messages.has(teamCode)) {
                     const teamMessages = messages.get(teamCode);
@@ -139,41 +150,71 @@ module.exports = function handler(req, res) {
                         chatId: teamCode,
                         messages: teamMessages
                     });
-                    console.log(`Sent ${teamMessages.length} team messages to ${userName}`);
+                    console.log(`✓ Sent ${teamMessages.length} team messages to ${userName}`);
                 }
                 
+                // Get and broadcast updated user list
                 const allUsersInTeam = getAllTeamUsers(teamCode);
-                console.log(`Broadcasting user list update to team ${teamCode}: ${allUsersInTeam.length} users`);
+                console.log(`Broadcasting user list to team ${teamCode}: ${allUsersInTeam.length} users`);
+                console.log('Users:', allUsersInTeam.map(u => `${u.name}(${u.online ? 'online' : 'offline'})`));
+                
+                // Send to all team members including the new user
                 io.to(teamCode).emit('users-update', allUsersInTeam);
                 
+                // Send join success to new user
                 socket.emit('join-success', { teamCode, userName });
-                console.log(`${userName} successfully joined ${teamCode}`);
+                
+                // Also send a separate status update to ensure online status is visible
+                setTimeout(() => {
+                    const refreshedUserList = getAllTeamUsers(teamCode);
+                    io.to(teamCode).emit('users-update', refreshedUserList);
+                    console.log(`✓ Sent refreshed user list to team ${teamCode}`);
+                }, 1000);
+                
+                console.log(`=== JOIN COMPLETE ===\n`);
             });
 
             socket.on('send-message', (data) => {
+                console.log(`\n=== SEND MESSAGE REQUEST ===`);
+                console.log(`Socket ID: ${socket.id}`);
+                console.log(`Available users: ${Array.from(users.keys()).join(', ')}`);
+                
                 const user = users.get(socket.id);
                 if (!user) {
-                    console.log('ERROR: User not found for socket:', socket.id);
-                    console.log('Available users:', Array.from(users.keys()));
+                    console.log(`❌ ERROR: User not found for socket ${socket.id}`);
+                    console.log(`Available users: ${Array.from(users.entries()).map(([id, u]) => `${id}:${u.name}`).join(', ')}`);
                     
-                    // Try to recover by asking client to rejoin
-                    socket.emit('session-expired');
-                    return;
+                    // Try to find user by checking if this socket might be in a different state
+                    let foundUser = null;
+                    for (const [socketId, userData] of users.entries()) {
+                        if (socketId === socket.id) {
+                            foundUser = userData;
+                            break;
+                        }
+                    }
+                    
+                    if (!foundUser) {
+                        console.log(`❌ No user found anywhere, requesting rejoin`);
+                        socket.emit('session-expired');
+                        return;
+                    } else {
+                        console.log(`✓ Found user data, continuing with message`);
+                    }
                 }
                 
+                const actualUser = user || foundUser;
                 const { text, file, chatType, targetUserId, targetUserKey } = data;
-                console.log(`\n=== MESSAGE FROM ${user.name} (${socket.id}) ===`);
-                console.log('Message data:', { text, chatType, targetUserId, targetUserKey });
+                console.log(`Message from ${actualUser.name}:`, { text, chatType, targetUserId, targetUserKey });
                 
                 const message = {
                     id: uuidv4(),
                     userId: socket.id,
-                    userKey: user.userKey,
-                    userName: user.name,
+                    userKey: actualUser.userKey,
+                    userName: actualUser.name,
                     text: text || '',
                     file: file || null,
                     timestamp: Date.now(),
-                    teamCode: user.teamCode,
+                    teamCode: actualUser.teamCode,
                     chatType: chatType || 'team',
                     targetUserId: targetUserId,
                     targetUserKey: targetUserKey
@@ -189,14 +230,14 @@ module.exports = function handler(req, res) {
                         // Check if targetUserId is a socket ID (online user)
                         if (users.has(targetUserId)) {
                             targetUser = users.get(targetUserId);
-                            chatId = getDirectChatId(user.userKey, targetUser.userKey);
+                            chatId = getDirectChatId(actualUser.userKey, targetUser.userKey);
                             actualTargetSocketId = targetUserId;
-                            console.log(`Direct message to ONLINE user: ${targetUser.name} (${targetUserId})`);
+                            console.log(`✓ Direct message to ONLINE user: ${targetUser.name} (${targetUserId})`);
                         } else {
                             // targetUserId might be a userKey (offline user reference)
                             console.log('Target not found as online user, checking offline users...');
-                            if (allTeamUsers.has(user.teamCode)) {
-                                const teamUserData = allTeamUsers.get(user.teamCode);
+                            if (allTeamUsers.has(actualUser.teamCode)) {
+                                const teamUserData = allTeamUsers.get(actualUser.teamCode);
                                 if (teamUserData.has(targetUserId)) {
                                     const offlineUserData = teamUserData.get(targetUserId);
                                     targetUser = {
@@ -204,12 +245,12 @@ module.exports = function handler(req, res) {
                                         name: offlineUserData.name,
                                         online: false
                                     };
-                                    chatId = getDirectChatId(user.userKey, targetUserId);
+                                    chatId = getDirectChatId(actualUser.userKey, targetUserId);
                                     
                                     // Check if user is actually online with different socket ID
                                     actualTargetSocketId = userSessions.get(targetUserId);
                                     if (actualTargetSocketId && users.has(actualTargetSocketId)) {
-                                        console.log(`User is actually online: ${actualTargetSocketId}`);
+                                        console.log(`✓ User is actually online: ${actualTargetSocketId}`);
                                         targetUser.online = true;
                                         targetUser.id = actualTargetSocketId;
                                     }
@@ -217,11 +258,11 @@ module.exports = function handler(req, res) {
                             }
                         }
                     } else if (targetUserKey) {
-                        chatId = getDirectChatId(user.userKey, targetUserKey);
+                        chatId = getDirectChatId(actualUser.userKey, targetUserKey);
                         console.log(`Direct message to user key: ${targetUserKey}`);
                         
-                        if (allTeamUsers.has(user.teamCode)) {
-                            const teamUserData = allTeamUsers.get(user.teamCode);
+                        if (allTeamUsers.has(actualUser.teamCode)) {
+                            const teamUserData = allTeamUsers.get(actualUser.teamCode);
                             if (teamUserData.has(targetUserKey)) {
                                 const offlineUserData = teamUserData.get(targetUserKey);
                                 targetUser = {
@@ -233,7 +274,7 @@ module.exports = function handler(req, res) {
                                 // Check if user is online
                                 actualTargetSocketId = userSessions.get(targetUserKey);
                                 if (actualTargetSocketId && users.has(actualTargetSocketId)) {
-                                    console.log(`User is online: ${actualTargetSocketId}`);
+                                    console.log(`✓ User is online: ${actualTargetSocketId}`);
                                     targetUser.online = true;
                                     targetUser.id = actualTargetSocketId;
                                 }
@@ -242,7 +283,7 @@ module.exports = function handler(req, res) {
                     }
                     
                     if (!targetUser) {
-                        console.log('ERROR: Could not identify target user');
+                        console.log('❌ ERROR: Could not identify target user');
                         socket.emit('error', { message: 'Target user not found' });
                         return;
                     }
@@ -279,7 +320,7 @@ module.exports = function handler(req, res) {
                         // Send unread notification to target
                         io.to(actualTargetSocketId).emit('unread-update', {
                             fromUserId: socket.id,
-                            fromUserName: user.name,
+                            fromUserName: actualUser.name,
                             count: currentCount + 1
                         });
                         
@@ -290,18 +331,18 @@ module.exports = function handler(req, res) {
                     
                 } else {
                     // TEAM MESSAGE HANDLING
-                    console.log(`Team message in ${user.teamCode}`);
+                    console.log(`Team message in ${actualUser.teamCode}`);
                     
-                    if (!messages.has(user.teamCode)) {
-                        messages.set(user.teamCode, []);
+                    if (!messages.has(actualUser.teamCode)) {
+                        messages.set(actualUser.teamCode, []);
                     }
                     
-                    messages.get(user.teamCode).push(message);
-                    console.log(`✓ Stored team message. Total: ${messages.get(user.teamCode).length}`);
+                    messages.get(actualUser.teamCode).push(message);
+                    console.log(`✓ Stored team message. Total: ${messages.get(actualUser.teamCode).length}`);
                     
                     // Broadcast to ALL team members including sender
-                    console.log(`✓ Broadcasting to team ${user.teamCode}`);
-                    io.to(user.teamCode).emit('new-message', message);
+                    console.log(`✓ Broadcasting to team ${actualUser.teamCode}`);
+                    io.to(actualUser.teamCode).emit('new-message', message);
                 }
                 
                 console.log('=== MESSAGE PROCESSING COMPLETE ===\n');
@@ -478,6 +519,16 @@ module.exports = function handler(req, res) {
                             socket.to(targetId).emit('conversation-deleted', { chatType: 'direct', targetId: socket.id });
                         }
                     }
+                }
+            });
+
+            socket.on('refresh-users', () => {
+                const user = users.get(socket.id);
+                if (user) {
+                    console.log(`Refresh users request from ${user.name}`);
+                    const allUsersInTeam = getAllTeamUsers(user.teamCode);
+                    socket.emit('users-update', allUsersInTeam);
+                    console.log(`Sent refreshed user list: ${allUsersInTeam.length} users`);
                 }
             });
 
