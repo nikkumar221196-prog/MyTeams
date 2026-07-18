@@ -61,7 +61,46 @@ function initializeSocket() {
 
     socket.on('error', (error) => {
         console.error('Socket.io error:', error);
-        alert('Error: ' + error.message);
+        if (error.message && error.message.includes('session')) {
+            // Session expired, try to rejoin
+            console.log('Session expired, attempting to rejoin...');
+            const savedSession = localStorage.getItem('myteams-session');
+            if (savedSession) {
+                try {
+                    const session = JSON.parse(savedSession);
+                    if (session.teamCode && session.userName) {
+                        setTimeout(() => {
+                            socket.emit('join-team', { teamCode: session.teamCode, userName: session.userName });
+                        }, 1000);
+                    }
+                } catch (error) {
+                    console.error('Error parsing session:', error);
+                    alert('Session error. Please refresh the page.');
+                }
+            }
+        } else {
+            alert('Error: ' + error.message);
+        }
+    });
+
+    socket.on('session-expired', () => {
+        console.log('Session expired event received');
+        const savedSession = localStorage.getItem('myteams-session');
+        if (savedSession) {
+            try {
+                const session = JSON.parse(savedSession);
+                if (session.teamCode && session.userName) {
+                    console.log('Attempting to rejoin team after session expiry...');
+                    socket.emit('join-team', { teamCode: session.teamCode, userName: session.userName });
+                }
+            } catch (error) {
+                console.error('Error parsing session:', error);
+                alert('Session expired. Please refresh the page.');
+            }
+        } else {
+            alert('Session expired. Please log in again.');
+            location.reload();
+        }
     });
 
     socket.on('reconnect', (attemptNumber) => {
@@ -576,17 +615,19 @@ function renderUsersList() {
 }
 
 function selectUser(user) {
-    // For offline users, we need to find an online user to get their current socket ID
-    // Or handle offline users differently
-    let targetUserId = user.id;
+    console.log('Selecting user:', user);
     
-    if (!user.online || !user.id) {
-        // User is offline, find if they have any direct message history
-        console.log(`Attempting to chat with offline user: ${user.name}`);
-        
-        // For offline users, we'll use their userKey to identify them
-        // When they come online, messages will still be associated correctly
-        targetUserId = user.userKey; // Use userKey for offline users
+    // Determine target user ID
+    let targetUserId = null;
+    
+    if (user.online && user.id) {
+        // User is online, use socket ID
+        targetUserId = user.id;
+        console.log(`Selected ONLINE user: ${user.name} (${user.id})`);
+    } else {
+        // User is offline, use userKey
+        targetUserId = user.userKey;
+        console.log(`Selected OFFLINE user: ${user.name} (${user.userKey})`);
     }
     
     // Switch to direct chat
@@ -596,7 +637,8 @@ function selectUser(user) {
         name: user.name,
         userKey: user.userKey,
         online: user.online,
-        lastSeen: user.lastSeen
+        lastSeen: user.lastSeen,
+        id: user.id // Store original ID too
     };
     
     // Save chat state
@@ -617,16 +659,17 @@ function selectUser(user) {
         event.currentTarget.classList.add('active');
     }
     
-    // Clear messages and request direct message history
+    // Clear messages and request message history
     messages = [];
     if (messagesContainer) messagesContainer.innerHTML = '';
     
+    console.log(`Requesting message history for: ${targetUserId}`);
+    
     if (user.online && user.id) {
-        // User is online, request normally
+        // User is online, request by socket ID
         socket.emit('get-direct-messages', { targetUserId: user.id });
     } else {
-        // User is offline, we can still show old message history
-        // The server will use userKey to find message history
+        // User is offline, request by userKey
         socket.emit('get-direct-messages-by-key', { targetUserKey: user.userKey });
     }
     
@@ -758,7 +801,7 @@ function sendMessage() {
     const text = messageInput.value.trim();
     console.log('=== SENDING MESSAGE ===');
     console.log('Message text:', text);
-    console.log('Current chat state:', { type: currentChatType, id: currentChatId });
+    console.log('Current chat state:', { type: currentChatType, id: currentChatId, target: currentChatTarget });
     
     if (text) {
         const messageData = {
@@ -766,16 +809,27 @@ function sendMessage() {
             chatType: currentChatType
         };
         
-        if (currentChatType === 'direct') {
-            // Check if target is a userKey (offline user) or socket ID (online user)
-            if (currentChatId && currentChatId.includes(':')) {
-                // This is a userKey (offline user)
-                messageData.targetUserKey = currentChatId;
-                console.log('Sending to offline user:', currentChatId);
+        if (currentChatType === 'direct' && currentChatTarget) {
+            // For direct messages, be smart about target identification
+            if (currentChatTarget.online && currentChatTarget.id) {
+                // Target is online, use socket ID
+                messageData.targetUserId = currentChatTarget.id;
+                console.log('Sending to ONLINE user via socket ID:', currentChatTarget.id);
             } else {
-                // This is a socket ID (online user)
-                messageData.targetUserId = currentChatId;
-                console.log('Sending to online user:', currentChatId);
+                // Target is offline or we're using userKey, use userKey
+                messageData.targetUserKey = currentChatTarget.userKey;
+                console.log('Sending to user via userKey:', currentChatTarget.userKey);
+            }
+            
+            // Also try currentChatId as fallback
+            if (!messageData.targetUserId && !messageData.targetUserKey) {
+                if (currentChatId && currentChatId.includes(':')) {
+                    messageData.targetUserKey = currentChatId;
+                    console.log('Fallback: Using currentChatId as userKey:', currentChatId);
+                } else {
+                    messageData.targetUserId = currentChatId;
+                    console.log('Fallback: Using currentChatId as socket ID:', currentChatId);
+                }
             }
         }
         

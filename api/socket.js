@@ -154,7 +154,10 @@ module.exports = function handler(req, res) {
                 const user = users.get(socket.id);
                 if (!user) {
                     console.log('ERROR: User not found for socket:', socket.id);
-                    socket.emit('error', { message: 'User session not found' });
+                    console.log('Available users:', Array.from(users.keys()));
+                    
+                    // Try to recover by asking client to rejoin
+                    socket.emit('session-expired');
                     return;
                 }
                 
@@ -187,11 +190,27 @@ module.exports = function handler(req, res) {
                             chatId = getDirectChatId(user.userKey, targetUser.userKey);
                             console.log(`Direct message to ONLINE user: ${targetUser.name} (${targetUserId})`);
                         } else {
-                            console.log('ERROR: Target user ID not found:', targetUserId);
+                            console.log('Target user ID not found, checking if offline user...');
+                            // Maybe target user is offline, try to find their userKey
+                            if (allTeamUsers.has(user.teamCode)) {
+                                const teamUserData = allTeamUsers.get(user.teamCode);
+                                for (const [userKey, userData] of teamUserData) {
+                                    if (userKey === targetUserId || userData.name === targetUserId) {
+                                        targetUser = {
+                                            userKey: userKey,
+                                            name: userData.name,
+                                            online: false
+                                        };
+                                        chatId = getDirectChatId(user.userKey, userKey);
+                                        console.log(`Found offline user: ${userData.name}`);
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     } else if (targetUserKey) {
                         chatId = getDirectChatId(user.userKey, targetUserKey);
-                        console.log(`Direct message to OFFLINE user: ${targetUserKey}`);
+                        console.log(`Direct message to user key: ${targetUserKey}`);
                         
                         if (allTeamUsers.has(user.teamCode)) {
                             const teamUserData = allTeamUsers.get(user.teamCode);
@@ -216,7 +235,7 @@ module.exports = function handler(req, res) {
                         directMessages.set(chatId, []);
                     }
                     
-                    // Store message
+                    // Store message with persistence
                     const storedMessage = {
                         ...message,
                         targetUserKey: targetUser.userKey || targetUserKey
@@ -229,7 +248,7 @@ module.exports = function handler(req, res) {
                     socket.emit('new-message', message);
                     
                     // Send to target if online
-                    if (targetUser.online !== false && targetUserId) {
+                    if (targetUser.online !== false && targetUserId && users.has(targetUserId)) {
                         console.log(`Sending message to online target: ${targetUserId}`);
                         socket.to(targetUserId).emit('new-message', message);
                         
@@ -242,6 +261,13 @@ module.exports = function handler(req, res) {
                         }
                     } else {
                         console.log('Target user offline, message saved for later delivery');
+                        
+                        // Send to target user if they're online but we're using their userKey
+                        const onlineTargetSocket = userSessions.get(targetUser.userKey);
+                        if (onlineTargetSocket && users.has(onlineTargetSocket)) {
+                            console.log(`Sending message to target via userKey: ${onlineTargetSocket}`);
+                            socket.to(onlineTargetSocket).emit('new-message', message);
+                        }
                     }
                     
                 } else {
@@ -269,23 +295,66 @@ module.exports = function handler(req, res) {
             socket.on('get-direct-messages', (data) => {
                 const { targetUserId } = data;
                 const currentUser = users.get(socket.id);
-                const targetUser = users.get(targetUserId);
                 
-                console.log(`Direct message history request: ${currentUser?.name} -> ${targetUser?.name}`);
+                console.log(`Direct message history request: ${currentUser?.name} -> target: ${targetUserId}`);
                 
                 if (!currentUser) {
                     console.log('ERROR: Current user not found');
+                    socket.emit('session-expired');
                     return;
                 }
                 
-                if (!targetUser) {
-                    console.log('ERROR: Target user not found for ID:', targetUserId);
+                let targetUser = users.get(targetUserId);
+                let chatId = null;
+                
+                if (targetUser) {
+                    // Target is online
+                    chatId = getDirectChatId(currentUser.userKey, targetUser.userKey);
+                    console.log(`Target online: ${targetUser.name}`);
+                } else {
+                    // Target might be offline, search by userKey or name
+                    if (allTeamUsers.has(currentUser.teamCode)) {
+                        const teamUserData = allTeamUsers.get(currentUser.teamCode);
+                        
+                        // Try to find by targetUserId as userKey
+                        if (teamUserData.has(targetUserId)) {
+                            const offlineUserData = teamUserData.get(targetUserId);
+                            targetUser = {
+                                userKey: targetUserId,
+                                name: offlineUserData.name,
+                                online: false
+                            };
+                            chatId = getDirectChatId(currentUser.userKey, targetUserId);
+                            console.log(`Found offline user by userKey: ${targetUser.name}`);
+                        } else {
+                            // Search by name or partial match
+                            for (const [userKey, userData] of teamUserData) {
+                                if (userData.name === targetUserId || userKey.includes(targetUserId)) {
+                                    targetUser = {
+                                        userKey: userKey,
+                                        name: userData.name,
+                                        online: false
+                                    };
+                                    chatId = getDirectChatId(currentUser.userKey, userKey);
+                                    console.log(`Found user by search: ${targetUser.name}`);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                if (!targetUser || !chatId) {
+                    console.log('ERROR: Target user not found anywhere');
+                    socket.emit('message-history', {
+                        chatType: 'direct',
+                        chatId: targetUserId,
+                        messages: []
+                    });
                     return;
                 }
                 
-                const chatId = getDirectChatId(currentUser.userKey, targetUser.userKey);
                 const chatMessages = directMessages.get(chatId) || [];
-                
                 console.log(`Sending ${chatMessages.length} direct messages for chat ${chatId}`);
                 
                 socket.emit('message-history', {
