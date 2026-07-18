@@ -162,7 +162,7 @@ module.exports = function handler(req, res) {
                 }
                 
                 const { text, file, chatType, targetUserId, targetUserKey } = data;
-                console.log(`\n=== MESSAGE FROM ${user.name} ===`);
+                console.log(`\n=== MESSAGE FROM ${user.name} (${socket.id}) ===`);
                 console.log('Message data:', { text, chatType, targetUserId, targetUserKey });
                 
                 const message = {
@@ -183,27 +183,35 @@ module.exports = function handler(req, res) {
                     // DIRECT MESSAGE HANDLING
                     let targetUser = null;
                     let chatId = null;
+                    let actualTargetSocketId = null;
                     
                     if (targetUserId) {
-                        targetUser = users.get(targetUserId);
-                        if (targetUser) {
+                        // Check if targetUserId is a socket ID (online user)
+                        if (users.has(targetUserId)) {
+                            targetUser = users.get(targetUserId);
                             chatId = getDirectChatId(user.userKey, targetUser.userKey);
+                            actualTargetSocketId = targetUserId;
                             console.log(`Direct message to ONLINE user: ${targetUser.name} (${targetUserId})`);
                         } else {
-                            console.log('Target user ID not found, checking if offline user...');
-                            // Maybe target user is offline, try to find their userKey
+                            // targetUserId might be a userKey (offline user reference)
+                            console.log('Target not found as online user, checking offline users...');
                             if (allTeamUsers.has(user.teamCode)) {
                                 const teamUserData = allTeamUsers.get(user.teamCode);
-                                for (const [userKey, userData] of teamUserData) {
-                                    if (userKey === targetUserId || userData.name === targetUserId) {
-                                        targetUser = {
-                                            userKey: userKey,
-                                            name: userData.name,
-                                            online: false
-                                        };
-                                        chatId = getDirectChatId(user.userKey, userKey);
-                                        console.log(`Found offline user: ${userData.name}`);
-                                        break;
+                                if (teamUserData.has(targetUserId)) {
+                                    const offlineUserData = teamUserData.get(targetUserId);
+                                    targetUser = {
+                                        userKey: targetUserId,
+                                        name: offlineUserData.name,
+                                        online: false
+                                    };
+                                    chatId = getDirectChatId(user.userKey, targetUserId);
+                                    
+                                    // Check if user is actually online with different socket ID
+                                    actualTargetSocketId = userSessions.get(targetUserId);
+                                    if (actualTargetSocketId && users.has(actualTargetSocketId)) {
+                                        console.log(`User is actually online: ${actualTargetSocketId}`);
+                                        targetUser.online = true;
+                                        targetUser.id = actualTargetSocketId;
                                     }
                                 }
                             }
@@ -221,6 +229,14 @@ module.exports = function handler(req, res) {
                                     name: offlineUserData.name,
                                     online: false
                                 };
+                                
+                                // Check if user is online
+                                actualTargetSocketId = userSessions.get(targetUserKey);
+                                if (actualTargetSocketId && users.has(actualTargetSocketId)) {
+                                    console.log(`User is online: ${actualTargetSocketId}`);
+                                    targetUser.online = true;
+                                    targetUser.id = actualTargetSocketId;
+                                }
                             }
                         }
                     }
@@ -241,33 +257,35 @@ module.exports = function handler(req, res) {
                         targetUserKey: targetUser.userKey || targetUserKey
                     };
                     directMessages.get(chatId).push(storedMessage);
-                    console.log(`Stored message in chat ${chatId}. Total messages: ${directMessages.get(chatId).length}`);
+                    console.log(`✓ Stored message in chat ${chatId}. Total messages: ${directMessages.get(chatId).length}`);
                     
-                    // Send to sender (should appear immediately on sender's screen)
-                    console.log('Sending message back to sender...');
+                    // ALWAYS send to sender first (immediate feedback)
+                    console.log('✓ Sending message confirmation to sender...');
                     socket.emit('new-message', message);
                     
-                    // Send to target if online
-                    if (targetUser.online !== false && targetUserId && users.has(targetUserId)) {
-                        console.log(`Sending message to online target: ${targetUserId}`);
-                        socket.to(targetUserId).emit('new-message', message);
+                    // Send to target user
+                    if (actualTargetSocketId && users.has(actualTargetSocketId)) {
+                        console.log(`✓ Sending message to target user: ${actualTargetSocketId} (${targetUser.name})`);
+                        io.to(actualTargetSocketId).emit('new-message', message);
                         
-                        // Verify the target socket exists
-                        const targetSocket = io.sockets.sockets.get(targetUserId);
-                        if (targetSocket) {
-                            console.log(`Target socket confirmed: ${targetUserId}`);
-                        } else {
-                            console.log(`WARNING: Target socket not found: ${targetUserId}`);
+                        // Update unread counts for target
+                        if (!unreadCounts.has(actualTargetSocketId)) {
+                            unreadCounts.set(actualTargetSocketId, new Map());
                         }
+                        const targetUnreads = unreadCounts.get(actualTargetSocketId);
+                        const currentCount = targetUnreads.get(socket.id) || 0;
+                        targetUnreads.set(socket.id, currentCount + 1);
+                        
+                        // Send unread notification to target
+                        io.to(actualTargetSocketId).emit('unread-update', {
+                            fromUserId: socket.id,
+                            fromUserName: user.name,
+                            count: currentCount + 1
+                        });
+                        
+                        console.log(`✓ Updated unread count for ${targetUser.name}: ${currentCount + 1}`);
                     } else {
-                        console.log('Target user offline, message saved for later delivery');
-                        
-                        // Send to target user if they're online but we're using their userKey
-                        const onlineTargetSocket = userSessions.get(targetUser.userKey);
-                        if (onlineTargetSocket && users.has(onlineTargetSocket)) {
-                            console.log(`Sending message to target via userKey: ${onlineTargetSocket}`);
-                            socket.to(onlineTargetSocket).emit('new-message', message);
-                        }
+                        console.log('⚠ Target user offline, message saved for later delivery');
                     }
                     
                 } else {
@@ -279,14 +297,11 @@ module.exports = function handler(req, res) {
                     }
                     
                     messages.get(user.teamCode).push(message);
-                    console.log(`Stored team message. Total: ${messages.get(user.teamCode).length}`);
+                    console.log(`✓ Stored team message. Total: ${messages.get(user.teamCode).length}`);
                     
-                    // Send to all team members INCLUDING sender
-                    console.log(`Broadcasting to team ${user.teamCode}`);
+                    // Broadcast to ALL team members including sender
+                    console.log(`✓ Broadcasting to team ${user.teamCode}`);
                     io.to(user.teamCode).emit('new-message', message);
-                    
-                    // Also send directly to sender to ensure they see it
-                    socket.emit('new-message', message);
                 }
                 
                 console.log('=== MESSAGE PROCESSING COMPLETE ===\n');

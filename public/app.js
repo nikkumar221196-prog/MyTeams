@@ -188,18 +188,38 @@ function setupSocketEventListeners() {
             belongsToCurrentChat = true;
             console.log('✓ Message belongs to current team chat');
         } else if (message.chatType === 'direct' && currentChatType === 'direct') {
-            // For direct messages, check multiple conditions
+            // For direct messages, check multiple conditions more thoroughly
             const isFromMe = message.userName === currentUser;
-            const isToMe = message.targetUserKey && currentUser && 
-                          message.targetUserKey === `${currentTeam}:${currentUser}`.toLowerCase();
-            const isFromCurrentTarget = currentChatTarget && message.userName === currentChatTarget.name;
-            const isToCurrentTarget = message.targetUserId === currentChatId || 
-                                    message.targetUserKey === currentChatId;
+            const isMyMessage = message.userId === socket?.id;
             
-            if (isFromMe || isToMe || isFromCurrentTarget || isToCurrentTarget) {
+            // Check if message involves current chat target
+            const isToMe = currentUser && (
+                message.targetUserKey === `${currentTeam}:${currentUser}`.toLowerCase() ||
+                message.targetUserId === socket?.id
+            );
+            
+            const isFromCurrentTarget = currentChatTarget && (
+                message.userName === currentChatTarget.name ||
+                message.userKey === currentChatTarget.userKey ||
+                message.userId === currentChatTarget.id
+            );
+            
+            const isToCurrentTarget = currentChatTarget && (
+                message.targetUserKey === currentChatTarget.userKey ||
+                message.targetUserId === currentChatTarget.id ||
+                message.targetUserId === currentChatId
+            );
+            
+            // Check if this is part of the current conversation
+            const isCurrentConversation = (isFromMe && (isToCurrentTarget || message.targetUserId === currentChatId)) ||
+                                         (isToMe && isFromCurrentTarget) ||
+                                         (isMyMessage) ||
+                                         (message.targetUserId === currentChatId || message.userId === currentChatId);
+            
+            if (isCurrentConversation) {
                 belongsToCurrentChat = true;
                 console.log('✓ Message belongs to current direct chat', {
-                    isFromMe, isToMe, isFromCurrentTarget, isToCurrentTarget
+                    isFromMe, isToMe, isFromCurrentTarget, isToCurrentTarget, isMyMessage
                 });
             }
         }
@@ -216,9 +236,25 @@ function setupSocketEventListeners() {
             }
         } else {
             console.log('- Message not for current chat');
-            // Still update user list for unread indicators
-            if (users && users.length > 0) {
-                renderUsersList();
+            
+            // If it's a direct message not for current chat, it might be an unread notification
+            if (message.chatType === 'direct') {
+                // Check if this creates an unread notification
+                const isToMe = currentUser && (
+                    message.targetUserKey === `${currentTeam}:${currentUser}`.toLowerCase() ||
+                    message.targetUserId === socket?.id
+                );
+                
+                if (isToMe) {
+                    // This is a message TO me from someone else, create unread notification
+                    const senderUser = users.find(u => u.id === message.userId || u.name === message.userName);
+                    if (senderUser) {
+                        const currentCount = unreadCounts.get(senderUser.id) || 0;
+                        unreadCounts.set(senderUser.id, currentCount + 1);
+                        console.log(`Added unread notification from ${senderUser.name}: ${currentCount + 1}`);
+                        renderUsersList();
+                    }
+                }
             }
         }
         
@@ -228,17 +264,20 @@ function setupSocketEventListeners() {
     socket.on('unread-update', (data) => {
         console.log('Unread update received:', data);
         
-        // Map socket ID to user name for display
-        const senderUser = users.find(u => u.id === data.fromUserId);
-        if (senderUser) {
-            unreadCounts.set(senderUser.id, data.count);
-            console.log(`Unread count for ${senderUser.name}: ${data.count}`);
-        } else {
-            // If sender user not found, just store by socket ID
+        if (data.fromUserId && data.count !== undefined) {
+            // Store unread count by sender ID
             unreadCounts.set(data.fromUserId, data.count);
+            
+            // Also try to match by user name for display
+            const senderUser = users.find(u => u.id === data.fromUserId || u.name === data.fromUserName);
+            if (senderUser) {
+                unreadCounts.set(senderUser.id, data.count);
+                console.log(`Unread count for ${senderUser.name}: ${data.count}`);
+            }
+            
+            // Update the UI
+            renderUsersList();
         }
-        
-        renderUsersList();
     });
 
     socket.on('conversation-deleted', (data) => {
@@ -673,11 +712,16 @@ function selectUser(user) {
         socket.emit('get-direct-messages-by-key', { targetUserKey: user.userKey });
     }
     
-    // Mark as read if user is online
-    if (user.online && user.id) {
+    // Mark as read - clear unread counts
+    if (user.id) {
         unreadCounts.set(user.id, 0);
-        renderUsersList();
     }
+    // Also clear by userKey for offline users
+    const userByKey = users.find(u => u.userKey === user.userKey);
+    if (userByKey && userByKey.id) {
+        unreadCounts.set(userByKey.id, 0);
+    }
+    renderUsersList();
     
     // Hide sidebar on mobile
     if (window.innerWidth <= 768 && sidebar) {
