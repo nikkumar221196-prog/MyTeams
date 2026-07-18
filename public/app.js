@@ -1,4 +1,4 @@
-// Socket.io connection for Vercel with initialization
+// Socket.io connection
 let socket;
 
 // Initialize Socket.io connection for Render.com
@@ -633,24 +633,6 @@ function handleLogin(e) {
     }
 }
 
-
-
-// Functions
-function handleLogin(e) {
-    e.preventDefault();
-    const teamCode = teamCodeInput.value.trim();
-    const userName = userNameInput.value.trim();
-    
-    if (teamCode && userName) {
-        // Save session to localStorage
-        localStorage.setItem('myteams-session', JSON.stringify({
-            teamCode: teamCode,
-            userName: userName
-        }));
-        
-        socket.emit('join-team', { teamCode, userName });
-    }
-}
 
 function showMainScreen() {
     loginScreen.classList.add('hidden');
